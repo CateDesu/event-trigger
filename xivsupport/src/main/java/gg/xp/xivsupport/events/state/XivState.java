@@ -139,4 +139,6 @@ public interface XivState extends SubState {
 	void provideNpcId(XivCombatant existing, long id);
 
 	void provideNpcNameId(XivCombatant existing, long id);
+
+	void provideCombatantOwner(XivCombatant cbt, XivCombatant parent);
 }
