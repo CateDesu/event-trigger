@@ -515,6 +515,11 @@ public class XivStateImpl implements XivState {
 	}
 
 	@Override
+	public void provideCombatantOwner(XivCombatant cbt, XivCombatant parent) {
+		getOrCreateData(cbt.getId()).setOwner(parent);
+	}
+
+	@Override
 	public @Nullable XivCombatant getCombatant(long id) {
 		CombatantData cbt = combatantData.get(id);
 		if (cbt == null) {
@@ -780,7 +785,12 @@ public class XivStateImpl implements XivState {
 		}
 
 		public void setOwner(XivCombatant combatant) {
-			this.owner = combatant;
+			if (combatant.isEnvironment()) {
+				this.owner = null;
+			}
+			else {
+				this.owner = combatant;
+			}
 			dirty = true;
 		}
 
@@ -872,7 +882,7 @@ public class XivStateImpl implements XivState {
 			long bnpcNameId = npcNameIdOverride >= 0 ? npcNameIdOverride : raw != null ? raw.getBnpcNameId() : 0;
 			long partyType = raw != null ? raw.getPartyType() : 0;
 			long level = raw != null ? raw.getLevel() : fromPartyInfo != null ? fromPartyInfo.getLevel() : 90;
-			long ownerId = raw != null ? raw.getOwnerId() : 0;
+			long ownerId = owner != null ? owner.getId() : raw != null ? raw.getOwnerId() : 0;
 			// TODO: changing primary player should dirty this
 			boolean isPlayer = rawType == 1;
 			long shieldAmount = hp != null ? shieldPercent * hp.max() / 100 : 0;

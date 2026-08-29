@@ -170,4 +170,9 @@ public class XivStateDummy implements XivState {
 	public void provideNpcNameId(XivCombatant existing, long id) {
 		throw new UnsupportedOperationException("not supported");
 	}
+
+	@Override
+	public void provideCombatantOwner(XivCombatant cbt, XivCombatant parent) {
+		throw new UnsupportedOperationException("not supported");
+	}
 }

@@ -15,6 +15,7 @@ import gg.xp.xivsupport.events.actlines.events.HeadMarkerEvent;
 import gg.xp.xivsupport.events.actlines.events.MapEffectEvent;
 import gg.xp.xivsupport.events.actlines.events.RawAddCombatantEvent;
 import gg.xp.xivsupport.events.actlines.events.RawRemoveCombatantEvent;
+import gg.xp.xivsupport.events.actlines.events.SpawnNpcExtraEvent;
 import gg.xp.xivsupport.events.actlines.events.SystemLogMessageEvent;
 import gg.xp.xivsupport.events.actlines.events.TargetabilityUpdate;
 import gg.xp.xivsupport.events.actlines.events.TetherEvent;
@@ -179,6 +180,12 @@ public enum CbEventType {
 			new CbfMap<>("targetId", "event.target.id", id(TetherEvent::getTarget)),
 			new CbfMap<>("target", "event.target.name", named(TetherEvent::getTarget)),
 			new CbfMap<>("id", "event.id", intConv(TetherEvent::getId, 16))
+	)),
+	SpawnNpcExtra(SpawnNpcExtraEvent.class, List.of(
+			new CbfMap<>("id", "event.target", id(SpawnNpcExtraEvent::getTarget)),
+			new CbfMap<>("parentId", "event.target.ownerId", intConv(e -> e.getTarget().getOwnerId(), 16)),
+			new CbfMap<>("tetherId", "event.tetherId", intConv(e -> (long) e.getTetherId(), 16)),
+			new CbfMap<>("animationState", "event.animationState", intConv(e -> (long) e.getAnimationState(), 16))
 	))
 
 

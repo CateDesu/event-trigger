@@ -252,6 +252,13 @@ public class FieldMapper<K extends Enum<K>> {
 		}
 	}
 
+	public XivCombatant getEntityWithParent(K idKey, K parentKey) {
+		XivCombatant cbtBefore = getEntity(idKey);
+		XivCombatant parent = getEntity(parentKey);
+		state.provideCombatantOwner(cbtBefore, parent);
+		return state.getLatestCombatantData(cbtBefore);
+	}
+
 	private String getRawField(int fieldIndex) {
 		return rawLineSplit[fieldIndex];
 	}
@@ -310,5 +317,4 @@ public class FieldMapper<K extends Enum<K>> {
 	public void flushStateOverrides() {
 		state.flushProvidedValues();
 	}
-
 }
