@@ -1,0 +1,41 @@
+# Weekly report on how far the guards branch lags upstream xpdota/event-trigger.
+# Sync with upstream stays a deliberate manual merge. This job only makes
+# stagnation loud: it opens one tracking issue and comments on it as the
+# drift grows. Nothing here merges, rebases or pushes.
+name: Upstream drift
+
+on:
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch upstream master
+        run: |
+          git remote add upstream https://github.com/xpdota/event-trigger.git
+          git fetch upstream master
+      - name: Report drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          behind=$(git rev-list --count HEAD..upstream/master)
+          echo "guards is $behind commits behind upstream master"
+          [ "$behind" -eq 0 ] && exit 0
+          body="guards is $behind commits behind xpdota/event-trigger master as of $(date -u +%F).
+
+          Sync ritual: git fetch upstream, merge upstream/master into guards, resolve, push, then bump ET_REF in the NyaaTriggers build.sh to the new guards tip."
+          existing=$(gh issue list --state open --search "upstream drift in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Upstream drift" --body "$body"
+          fi
