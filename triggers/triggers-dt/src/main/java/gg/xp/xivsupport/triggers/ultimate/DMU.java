@@ -1543,10 +1543,20 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	private final SequentialTrigger<BaseEvent> earthquakeRolesRealCleanseTracker = SqtTemplates.sq(180_000,
 			AccretionRolesEvent.class, ignored -> true,
 			(e1, s) -> {
-				// TODO: this runs out of time
-				while (e1.anyRemain()) {
-					var hit = s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAFC) && aue.isFirstTarget());
-					e1.recordNothingnessHit(hit);
+				try {
+					while (e1.anyRemain()) {
+						// Wake on every cleanse so the loop sees the last crust fall off
+						// instead of parking on a nothingness hit that never comes
+						var hit = s.waitEventUntil(
+								AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAFC) && aue.isFirstTarget(),
+								BuffRemoved.class, br -> br.buffIdMatches(CRUST));
+						if (hit != null) {
+							e1.recordNothingnessHit(hit);
+						}
+					}
+				}
+				catch (SequentialTriggerTimeoutException e) {
+					log.error("Earthquake nothingness tracker timed out. Remaining crusts: {}", e1.getTotalRemaining());
 				}
 			});
 
@@ -1573,42 +1583,47 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				}, myBuff);
 				s.call(earthquakePersistentTracker, e1);
 
-				while (e1.anyRemain()) {
-					BuffRemoved br = s.waitEvent(BuffRemoved.class, e -> e.buffIdMatches(CRUST));
-					XivPlayerCharacter target = (XivPlayerCharacter) br.getTarget();
-					AccretionRole targetRole = e1.combatantMap.get(target);
-					if (targetRole == null) {
-						log.error("targetRole was null! Target: {}", target);
-						continue;
-					}
-					if (target.isThePlayer()) {
-						s.updateCall(earthquakeSelfCleanse);
-					}
-					else {
-						CleanseCallOption opt = cleanseCallSetting.get();
-						// An intended cleanse is one where the player in question was recently the primary target of "nothingness"
-						AbilityUsedEvent lastNothingnessHit = e1.lastNothingnessHit.get(target);
-						boolean isIntendedCleanse = lastNothingnessHit != null && lastNothingnessHit.getEffectiveTimeSince().toMillis() < 2_000;
-						switch (opt) {
-							// Unconditional
-							case ALL -> {
-								if (isIntendedCleanse) {
-									s.updateCall(earthquakeCleansed, br);
+				try {
+					while (e1.anyRemain()) {
+						BuffRemoved br = s.waitEvent(BuffRemoved.class, e -> e.buffIdMatches(CRUST));
+						XivPlayerCharacter target = (XivPlayerCharacter) br.getTarget();
+						AccretionRole targetRole = e1.combatantMap.get(target);
+						if (targetRole == null) {
+							log.error("targetRole was null! Target: {}", target);
+							continue;
+						}
+						if (target.isThePlayer()) {
+							s.updateCall(earthquakeSelfCleanse);
+						}
+						else {
+							CleanseCallOption opt = cleanseCallSetting.get();
+							// An intended cleanse is one where the player in question was recently the primary target of "nothingness"
+							AbilityUsedEvent lastNothingnessHit = e1.lastNothingnessHit.get(target);
+							boolean isIntendedCleanse = lastNothingnessHit != null && lastNothingnessHit.getEffectiveTimeSince().toMillis() < 2_000;
+							switch (opt) {
+								// Unconditional
+								case ALL -> {
+									if (isIntendedCleanse) {
+										s.updateCall(earthquakeCleansed, br);
+									}
 								}
-							}
-							case MATCHED -> {
-								// This one does NOT have "intended cleanse" logic
-								if (myRole.getPrevious() == targetRole) {
-									s.updateCall(earthquakeCleansed, br);
+								case MATCHED -> {
+									// This one does NOT have "intended cleanse" logic
+									if (myRole.getPrevious() == targetRole) {
+										s.updateCall(earthquakeCleansed, br);
+									}
 								}
-							}
-							case PRIOR_SET -> {
-								if (isIntendedCleanse && targetRole.getSet() == myRole.getSet() - 1) {
-									s.updateCall(earthquakeCleansed, br);
+								case PRIOR_SET -> {
+									if (isIntendedCleanse && targetRole.getSet() == myRole.getSet() - 1) {
+										s.updateCall(earthquakeCleansed, br);
+									}
 								}
 							}
 						}
 					}
+				}
+				catch (SequentialTriggerTimeoutException e) {
+					log.error("Earthquake cleanse calls timed out. Remaining crusts: {}", e1.getTotalRemaining());
 				}
 			});
 
@@ -2567,14 +2582,19 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 							}
 						})
 						.findFirst()
-						.orElseThrow();
+						.orElse(null);
 
-				RawModifiedCallout<BuffApplied> call = s.updateCall(getDynEntCall(
-						dynEntro1.buffIdMatches(DYNAMIC),
-						dynEntro1.getInitialDuration().toSeconds() > 75,
-						chReal1), dynEntro1);
-				// TODO: test if this actually works (setting the delay immediately after submitting)
-				call.setTtsDelayMs(2_000);
+				if (dynEntro1 != null) {
+					RawModifiedCallout<BuffApplied> call = s.updateCall(getDynEntCall(
+							dynEntro1.buffIdMatches(DYNAMIC),
+							dynEntro1.getInitialDuration().toSeconds() > 75,
+							chReal1), dynEntro1);
+					// TODO: test if this actually works (setting the delay immediately after submitting)
+					call.setTtsDelayMs(2_000);
+				}
+				else {
+					log.error("KefkaSays: no entropy or dynamic buff found after the wait, skipping the first call");
+				}
 
 				log.info("Waiting for chVfx2");
 				var chVfx2 = s.waitEvent(StatusLoopVfxApplied.class, v -> v.getTarget().npcIdMatches(NPC_CHAOS));
@@ -2597,11 +2617,16 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 							}
 						})
 						.findFirst()
-						.orElseThrow();
-				s.updateCall(getDynEntCall(
-						dynEntro2.buffIdMatches(DYNAMIC),
-						dynEntro2.getInitialDuration().toSeconds() > 60,
-						chReal2), dynEntro2);
+						.orElse(null);
+				if (dynEntro2 != null) {
+					s.updateCall(getDynEntCall(
+							dynEntro2.buffIdMatches(DYNAMIC),
+							dynEntro2.getInitialDuration().toSeconds() > 60,
+							chReal2), dynEntro2);
+				}
+				else {
+					log.error("KefkaSays: no second entropy or dynamic buff found after the wait, skipping the second call");
+				}
 
 				// Wait for thunder charged
 				s.waitEvent(BuffApplied.class, ba -> ba.buffIdMatches(0x5CD));
