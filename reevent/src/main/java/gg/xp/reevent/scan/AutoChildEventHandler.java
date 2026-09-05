@@ -75,6 +75,9 @@ public abstract class AutoChildEventHandler {
 					catch (IllegalAccessException e) {
 						throw new RuntimeException(e);
 					}
+					if (handler instanceof NameableChildHandler nch && nch.getHandlerName() == null) {
+						nch.setHandlerName(getClass().getSimpleName() + '.' + field.getName());
+					}
 					//noinspection unchecked,rawtypes
 					handlers.add(new ChildEventHandler(handler, handler.getType(), field.getName()));
 //					Class<?> realType;
@@ -134,6 +137,9 @@ public abstract class AutoChildEventHandler {
 						}
 						else {
 							eventCls = Event.class;
+						}
+						if (handler instanceof NameableChildHandler nch && nch.getHandlerName() == null) {
+							nch.setHandlerName(getClass().getSimpleName() + '.' + field.getName());
 						}
 						ChildEventHandler<?> ceh = new ChildEventHandler(handler, eventCls, field.getName());
 						handlers.add(ceh);

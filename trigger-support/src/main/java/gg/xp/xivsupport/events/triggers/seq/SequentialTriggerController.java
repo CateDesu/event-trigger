@@ -14,7 +14,9 @@ import gg.xp.xivsupport.events.actlines.events.BuffRemoved;
 import gg.xp.xivsupport.events.actlines.events.CastLocationDataEvent;
 import gg.xp.xivsupport.events.actlines.events.DescribesCastLocation;
 import gg.xp.xivsupport.events.actlines.events.HasAbility;
+import gg.xp.xivsupport.events.actlines.events.WipeEvent;
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
+import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
 import gg.xp.xivsupport.events.state.RefreshCombatantsRequest;
 import gg.xp.xivsupport.events.state.combatstate.ActiveCastRepository;
 import gg.xp.xivsupport.events.state.combatstate.CastResult;
@@ -62,13 +64,18 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	private volatile boolean cycleProcessingTimeExceeded;
 	private volatile @Nullable Predicate<X> filter;
 	private final Map<String, Object> params = new LinkedHashMap<>();
+	private final @Nullable String triggerName;
+	private volatile @Nullable String pendingWait;
+	private volatile long lastWipeOrPullAt;
+	private volatile boolean deathRequested;
 
 	// To be called from external thread
-	public SequentialTriggerController(EventContext initialEventContext, X initialEvent, BiConsumer<X, SequentialTriggerController<X>> triggerCode, int timeout) {
+	public SequentialTriggerController(EventContext initialEventContext, X initialEvent, BiConsumer<X, SequentialTriggerController<X>> triggerCode, int timeout, @Nullable String triggerName) {
 		expired = () -> initialEvent.getEffectiveTimeSince().toMillis() > timeout;
 		this.timeout = timeout;
 //		expiresAt = initialEvent.getHappenedAt().plusMillis(timeout);
 		context = initialEventContext;
+		this.triggerName = triggerName;
 		triggerThread = new Thread(() -> {
 			try {
 				triggerCode.accept(initialEvent, this);
@@ -77,7 +84,27 @@ public class SequentialTriggerController<X extends BaseEvent> {
 				log.info("Sequential Trigger Requested to End");
 			}
 			catch (Throwable t) {
-				log.error("Error in sequential trigger", t);
+				if (deathRequested || lastWipeOrPullAt > 0) {
+					log.info("Sequential trigger '{}' ended quietly while waiting for '{}'", triggerName, pendingWait);
+				}
+				else {
+					// Only usable while the chain dies inside an event handler call.
+					// The expiry path in provideEvent arranges that for timeouts.
+					EventContext emitCtx = context;
+					if (emitCtx != null) {
+						try {
+							emitCtx.accept(new SequentialTriggerFailedEvent(triggerName, pendingWait, initialEvent, t));
+						}
+						catch (Throwable emitFailure) {
+							log.error("Failed to emit sequential trigger failure event", emitFailure);
+						}
+					}
+					else {
+						log.error("Sequential trigger failure event could not be emitted, no live event context");
+					}
+					// Keep the Error in sequential trigger prefix, downstream log watches match on it
+					log.error("Error in sequential trigger '{}' while waiting for '{}'", triggerName, pendingWait, t);
+				}
 			}
 			finally {
 				synchronized (lock) {
@@ -132,6 +159,7 @@ public class SequentialTriggerController<X extends BaseEvent> {
 		synchronized (lock) {
 			// Also make it configurable as to whether or not a wipe ends the trigger
 			log.info("Sequential trigger force expired");
+			deathRequested = true;
 			die = true;
 			lock.notifyAll();
 		}
@@ -177,7 +205,7 @@ public class SequentialTriggerController<X extends BaseEvent> {
 		// likely when replaying)
 		DelayedSqtEvent event = new DelayedSqtEvent(ms);
 		enqueue(event);
-		waitEvent(BaseEvent.class, e -> initialEvent.getEffectiveTimeSince().toMillis() >= doneAt);
+		waitEvent(BaseEvent.class, e -> initialEvent.getEffectiveTimeSince().toMillis() >= doneAt, "waitMs " + ms);
 	}
 
 	private @Nullable HasCalloutTrackingKey lastCall;
@@ -377,8 +405,12 @@ public class SequentialTriggerController<X extends BaseEvent> {
 
 	// To be called from internal thread
 	public <Y> Y waitEvent(Class<Y> eventClass, Predicate<Y> eventFilter) {
+		return waitEvent(eventClass, eventFilter, eventClass.getSimpleName());
+	}
+
+	private <Y> Y waitEvent(Class<Y> eventClass, Predicate<Y> eventFilter, String description) {
 		log.trace("Waiting for specific event");
-		return (Y) waitEvent(event -> eventClass.isInstance(event) && eventFilter.test((Y) event));
+		return (Y) waitEvent(event -> eventClass.isInstance(event) && eventFilter.test((Y) event), description);
 	}
 
 	// To be called from internal thread
@@ -489,7 +521,7 @@ public class SequentialTriggerController<X extends BaseEvent> {
 		Y last = waitEvent(eventClass, eventFilter);
 		out.add(last);
 		while (true) {
-			X event = waitEvent(e -> true);
+			X event = waitEvent(e -> true, eventClass.getSimpleName() + " in quick succession");
 			// First possibility - event we're interested int
 			if (eventClass.isInstance(event) && eventFilter.test((Y) event)) {
 				out.add((Y) event);
@@ -660,7 +692,7 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	public <Y, Z> List<Y> waitEventsUntil(int limit, Class<Y> eventClass, Predicate<Y> eventFilter, Class<Z> stopOnType, Predicate<Z> stopOn) {
 		List<Y> out = new ArrayList<>();
 		while (true) {
-			X event = waitEvent(e -> true);
+			X event = waitEvent(e -> true, eventClass.getSimpleName() + " until " + stopOnType.getSimpleName());
 			// First possibility - event we're interested int
 			if (eventClass.isInstance(event) && eventFilter.test((Y) event)) {
 				out.add((Y) event);
@@ -679,12 +711,13 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	}
 
 	// To be called from internal thread
-	private X waitEvent(Predicate<X> filter) {
+	private X waitEvent(Predicate<X> filter, String description) {
 		synchronized (lock) {
 			processing = false;
 			currentEvent = null;
 			context = null;
 			this.filter = filter;
+			pendingWait = description;
 			lock.notifyAll();
 			while (true) {
 				if (die) {
@@ -703,6 +736,7 @@ public class SequentialTriggerController<X extends BaseEvent> {
 					X event = currentEvent;
 					currentEvent = null;
 					this.filter = null;
+					pendingWait = null;
 					return event;
 				}
 
@@ -720,13 +754,25 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	// To be called from external thread
 	public void provideEvent(EventContext ctx, X event) {
 		synchronized (lock) {
-			// TODO: expire on wipe?
-			// Also make it configurable as to whether or not a wipe ends the trigger
+			// A dying chain consumes nothing, and feeding it would just wedge
+			// the re-entrant failure event its own death emits
+			if (die) {
+				return;
+			}
+			// Wipes and pull starts are remembered so a stale timeout stays quiet later
+			if (event instanceof WipeEvent || event instanceof PullStartedEvent) {
+				lastWipeOrPullAt = System.currentTimeMillis();
+			}
 			if (expired.getAsBoolean()) {
 //			if (event.getHappenedAt().isAfter(expiresAt)) {
 				log.warn("Sequential trigger expired by event after {}/{}ms: {}", initialEvent.getEffectiveTimeSince().toMillis(), timeout, event);
+				// Hand the dying chain a live context and wait for it, so its
+				// failure event can go out inside this handler call
+				context = ctx;
+				processing = true;
 				die = true;
 				lock.notifyAll();
+				waitProcessingDone();
 				return;
 			}
 			Predicate<X> filt = filter;

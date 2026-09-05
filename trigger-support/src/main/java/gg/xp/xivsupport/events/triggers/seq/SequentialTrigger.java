@@ -3,6 +3,7 @@ package gg.xp.xivsupport.events.triggers.seq;
 import gg.xp.reevent.events.BaseEvent;
 import gg.xp.reevent.events.EventContext;
 import gg.xp.reevent.events.TypedEventHandler;
+import gg.xp.reevent.scan.NameableChildHandler;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -21,7 +22,7 @@ import java.util.function.Predicate;
  *
  * @param <X> The event type. Should usually just be 'BaseEvent'.
  */
-public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler<X> {
+public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler<X>, NameableChildHandler {
 
 	private @Nullable SequentialTriggerController<X> instance;
 	private final List<SequentialTriggerController<X>> instances = new ArrayList<>();
@@ -30,6 +31,7 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 	private final Predicate<X> startOn;
 	private final BiConsumer<X, SequentialTriggerController<X>> trigger;
 	private SequentialTriggerConcurrencyMode concurrency = SequentialTriggerConcurrencyMode.BLOCK_NEW;
+	private volatile @Nullable String handlerName;
 
 	public SequentialTrigger(int timeoutMs, Class<X> type, Predicate<X> startOn, BiConsumer<X, SequentialTriggerController<X>> trigger) {
 		this.timeoutMs = timeoutMs;
@@ -52,7 +54,7 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 			case BLOCK_NEW -> {
 				if (instance == null) {
 					if (startOn.test(event)) {
-						instance = new SequentialTriggerController<>(ctx, event, trigger, timeoutMs);
+						instance = new SequentialTriggerController<>(ctx, event, trigger, timeoutMs, handlerName);
 					}
 				}
 				else {
@@ -67,7 +69,7 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 					if (instance != null) {
 						instance.stopSilently();
 					}
-					instance = new SequentialTriggerController<>(ctx, event, trigger, timeoutMs);
+					instance = new SequentialTriggerController<>(ctx, event, trigger, timeoutMs, handlerName);
 				}
 				if (instance != null) {
 					instance.provideEvent(ctx, event);
@@ -86,7 +88,7 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 					}
 				}
 				if (startOn.test(event)) {
-					instances.add(new SequentialTriggerController<>(ctx, event, trigger, timeoutMs));
+					instances.add(new SequentialTriggerController<>(ctx, event, trigger, timeoutMs, handlerName));
 				}
 			}
 		}
@@ -138,5 +140,15 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 	public SequentialTrigger<X> setConcurrency(SequentialTriggerConcurrencyMode concurrency) {
 		this.concurrency = concurrency;
 		return this;
+	}
+
+	@Override
+	public @Nullable String getHandlerName() {
+		return handlerName;
+	}
+
+	@Override
+	public void setHandlerName(String name) {
+		this.handlerName = name;
 	}
 }
