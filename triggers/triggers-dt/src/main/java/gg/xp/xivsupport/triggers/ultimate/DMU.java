@@ -26,6 +26,7 @@ import gg.xp.xivsupport.events.state.combatstate.StatusEffectRepository;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerConcurrencyMode;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerController;
+import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerTimeoutException;
 import gg.xp.xivsupport.events.triggers.seq.SqtTemplates;
 import gg.xp.xivsupport.events.triggers.support.NpcCastCallout;
 import gg.xp.xivsupport.events.triggers.support.PlayerStatusCallout;
@@ -412,14 +413,31 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBAB9),
 			(e1, s) -> {
 				s.updateCall(ttInitial, e1);
-				// I thought it had a consistent ordering at first, but I think they intentionally try to confuse you
-				// by using multiple different versions with different party list ordering.
-				var shortBuff = s.findOrWaitForBuff(buffs, ba -> ba.getTarget().isThePlayer()
-				                                                 && ba.buffIdMatches(0x130C, 0x130D, 0x130E, 0x130F, 0x13D7, 0x13D8, 0x13D9, 0x13DA)
-				                                                 && ba.getInitialDuration().toMillis() < 8_500);
-				var longBuff = s.findOrWaitForBuff(buffs, ba -> ba.getTarget().isThePlayer()
-				                                                && ba.buffIdMatches(0x130C, 0x130D, 0x130E, 0x130F, 0x13D7, 0x13D8, 0x13D9, 0x13DA)
-				                                                && ba.getInitialDuration().toMillis() > 8_500);
+				// NyaaTriggers: the two waits used to split on a hard 8.5s boundary,
+				// set 1 ~7s vs set 2 ~10s. On some pulls one side of the split never
+				// matched, the invocation then ran out its whole 180s budget, and every
+				// TT callout after "Arrows" silently vanished for the pull. Take the
+				// player's two arrow buffs in any order and sort by initial duration,
+				// shorter resolves first. A timeout now speaks ttError and logs what
+				// the engine actually saw, instead of dying quietly.
+				BuffApplied firstArrow;
+				BuffApplied secondArrow;
+				java.util.function.Predicate<BuffApplied> arrowBuff = ba -> ba.getTarget().isThePlayer()
+						&& ba.buffIdMatches(0x130C, 0x130D, 0x130E, 0x130F, 0x13D7, 0x13D8, 0x13D9, 0x13DA);
+				try {
+					firstArrow = s.findOrWaitForBuff(buffs, arrowBuff);
+					BuffApplied first = firstArrow;
+					secondArrow = s.findOrWaitForBuff(buffs, ba -> arrowBuff.test(ba) && ba != first);
+				}
+				catch (SequentialTriggerTimeoutException e) {
+					log.error("TT arrows never reached this trigger. Arrow buffs now in state: {}",
+							buffs.findBuffs(ba -> ba.buffIdMatches(0x130C, 0x130D, 0x130E, 0x130F, 0x13D7, 0x13D8, 0x13D9, 0x13DA)));
+					s.updateCall(ttError);
+					return;
+				}
+				var shortBuff = firstArrow.getInitialDuration().compareTo(secondArrow.getInitialDuration()) <= 0
+						? firstArrow : secondArrow;
+				var longBuff = firstArrow == shortBuff ? secondArrow : firstArrow;
 
 				var dir1 = switch ((int) shortBuff.getBuff().getId()) {
 					case 0x130C, 0x13D7 -> ArrowDirection.UP;
