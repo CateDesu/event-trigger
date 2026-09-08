@@ -23,6 +23,9 @@ import gg.xp.xivsupport.events.state.XivState;
 import gg.xp.xivsupport.events.state.combatstate.ActiveCastRepository;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectCurrentStatus;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectRepository;
+import gg.xp.xivsupport.events.triggers.marks.ClearAutoMarkRequest;
+import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
+import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkRequest;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerConcurrencyMode;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerController;
@@ -2042,6 +2045,35 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 		return buffs.stream().filter(ba -> ba.buffIdMatches(ids)).findAny().orElse(null);
 	}
 
+	private static void markPair(SequentialTriggerController<?> s, List<BuffApplied> debuffs, long buffId, MarkerSign first, MarkerSign second) {
+		List<XivPlayerCharacter> holders = debuffs.stream()
+				.filter(ba -> ba.buffIdMatches(buffId))
+				.map(BuffApplied::getTarget)
+				.filter(XivPlayerCharacter.class::isInstance)
+				.map(XivPlayerCharacter.class::cast)
+				.toList();
+		if (!holders.isEmpty()) {
+			s.accept(new SpecificAutoMarkRequest(holders.get(0), first));
+			if (holders.size() > 1) {
+				s.accept(new SpecificAutoMarkRequest(holders.get(1), second));
+			}
+		}
+	}
+
+	private static void clearPairWhenResolved(SequentialTriggerController<?> s, StatusEffectRepository buffs, List<BuffApplied> debuffs, long buffId) {
+		List<BuffApplied> pair = debuffs.stream().filter(ba -> ba.buffIdMatches(buffId)).toList();
+		if (pair.isEmpty()) {
+			return;
+		}
+		// Both debuffs of a pair resolve at the same time so waiting on one is enough
+		s.waitBuffRemoved(buffs, pair.get(0));
+		pair.stream()
+				.map(BuffApplied::getTarget)
+				.filter(XivPlayerCharacter.class::isInstance)
+				.map(XivPlayerCharacter.class::cast)
+				.forEach(player -> s.accept(new SpecificAutoMarkRequest(player, MarkerSign.CLEAR)));
+	}
+
 	private ModifiableCallout<BuffApplied> getDynEntCall(boolean isDynamic, boolean isLong, boolean isReal) {
 		if (isDynamic) {
 			if (isLong) {
@@ -2209,15 +2241,20 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 //				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBB14));
 				// Doing it like this so the trigger doesn't get messed up if player is dead and doesn't get a debuff
 				log.info("Waiting for debuff spam");
-				var myDebuffs1 = s.waitEventsQuickSuccession(10, BuffApplied.class, ba -> ba.buffIdMatches(FORK, WATER, SHRIEK, ACCEL))
+				var allDebuffs1 = s.waitEventsQuickSuccession(10, BuffApplied.class, ba -> ba.buffIdMatches(FORK, WATER, SHRIEK, ACCEL))
 						.stream()
 						.peek(ba -> {
 							if (!neReal1) {
 								fakeDebuffs.add(ba);
 							}
 						})
+						.toList();
+				var myDebuffs1 = allDebuffs1.stream()
 						.filter(ba -> ba.getTarget().isThePlayer())
 						.toList();
+				markPair(s, allDebuffs1, FORK, MarkerSign.ATTACK1, MarkerSign.ATTACK2);
+				markPair(s, allDebuffs1, WATER, MarkerSign.BIND1, MarkerSign.BIND2);
+				markPair(s, allDebuffs1, SHRIEK, MarkerSign.IGNORE1, MarkerSign.IGNORE2);
 				BuffApplied myAccel1 = findById(myDebuffs1, ACCEL);
 				BuffApplied myShriek1 = findById(myDebuffs1, SHRIEK);
 				BuffApplied myWater1 = findById(myDebuffs1, WATER);
@@ -2268,13 +2305,15 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				boolean neReal2 = neVfx2.vfxIdMatches(REAL_NE);
 
 				log.info("Waiting for debuff spam 2");
-				var myDebuffs2 = s.waitEventsQuickSuccession(10, BuffApplied.class, ba -> ba.buffIdMatches(FORK, WATER, SHRIEK, ACCEL))
+				var allDebuffs2 = s.waitEventsQuickSuccession(10, BuffApplied.class, ba -> ba.buffIdMatches(FORK, WATER, SHRIEK, ACCEL))
 						.stream()
 						.peek(ba -> {
 							if (!neReal2) {
 								fakeDebuffs.add(ba);
 							}
 						})
+						.toList();
+				var myDebuffs2 = allDebuffs2.stream()
 						.filter(ba -> ba.getTarget().isThePlayer())
 						.toList();
 				BuffApplied myAccel2 = findById(myDebuffs2, ACCEL);
@@ -2470,6 +2509,13 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					s.setParam("fakeShriek", fakeShriek);
 					s.updateCall(shortShriekYou == null ? ksThunderShriek : ksThunderShriekOnYou, shortShriek);
 				}
+				clearPairWhenResolved(s, buffs, allDebuffs1, FORK);
+				clearPairWhenResolved(s, buffs, allDebuffs1, WATER);
+				clearPairWhenResolved(s, buffs, allDebuffs1, SHRIEK);
+				s.accept(new ClearAutoMarkRequest());
+				markPair(s, allDebuffs2, FORK, MarkerSign.ATTACK1, MarkerSign.ATTACK2);
+				markPair(s, allDebuffs2, WATER, MarkerSign.BIND1, MarkerSign.BIND2);
+				markPair(s, allDebuffs2, SHRIEK, MarkerSign.IGNORE1, MarkerSign.IGNORE2);
 				var kefkaHm2 = s.waitEvent(HeadMarkerEvent.class, hme -> hme.eitherTargetMatches(cbt -> cbt.npcIdMatches(NPC_KEFKA)));
 				boolean fakeIce = kefkaHm2.markerIdMatches(FAKE_ICE);
 
@@ -2536,12 +2582,17 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 						s.waitBuffRemoved(buffs, stackBuff);
 					}
 
+					clearPairWhenResolved(s, buffs, allDebuffs2, FORK);
+					clearPairWhenResolved(s, buffs, allDebuffs2, WATER);
+
 					BuffApplied longShriek = buffs.findBuff(ba -> ba.buffIdMatches(SHRIEK) && ba.getEstimatedRemainingDuration().toSeconds() < 15);
 					BuffApplied longShriekOnYou = buffs.findBuff(ba -> ba.buffIdMatches(SHRIEK) && ba.getEstimatedRemainingDuration().toSeconds() < 15 && ba.getTarget().isThePlayer());
 					boolean fakeShriek = fakeDebuffs.contains(longShriek);
 					s.setParam("fakeShriek", fakeShriek);
 					s.updateCall(longShriekOnYou == null ? ksSecondShriek : ksSecondShriekOnYou, longShriek);
 				}
+				clearPairWhenResolved(s, buffs, allDebuffs2, SHRIEK);
+				s.accept(new ClearAutoMarkRequest());
 			});
 
 	@AutoFeed
