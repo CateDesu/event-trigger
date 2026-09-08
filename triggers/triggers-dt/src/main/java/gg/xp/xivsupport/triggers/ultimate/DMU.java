@@ -18,14 +18,14 @@ import gg.xp.xivsupport.events.actlines.events.BuffRemoved;
 import gg.xp.xivsupport.events.actlines.events.DescribesCastLocation;
 import gg.xp.xivsupport.events.actlines.events.HeadMarkerEvent;
 import gg.xp.xivsupport.events.actlines.events.TetherEvent;
+import gg.xp.xivsupport.events.actlines.events.WipeEvent;
+import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
+import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
 import gg.xp.xivsupport.events.actlines.events.vfx.StatusLoopVfxApplied;
 import gg.xp.xivsupport.events.state.XivState;
 import gg.xp.xivsupport.events.state.combatstate.ActiveCastRepository;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectCurrentStatus;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectRepository;
-import gg.xp.xivsupport.events.triggers.marks.ClearAutoMarkRequest;
-import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
-import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkRequest;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerConcurrencyMode;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerController;
@@ -81,6 +81,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	private XivState state;
 	private ActiveCastRepository casts;
 	private StatusEffectRepository buffs;
+	private DmuDebuffMarks kefkaMarks;
 
 	private EnumSetting<CleanseCallOption> cleanseCallSetting;
 	private BooleanSetting doubleTowerOnlyWithNoDebuff;
@@ -89,6 +90,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 		this.state = state;
 		this.casts = casts;
 		this.buffs = buffs;
+		kefkaMarks = new DmuDebuffMarks(buffs);
 		String settingsBase = "triggers.dmu.";
 		cleanseCallSetting = new EnumSetting<>(pers, settingsBase + "cleanse-call-setting", CleanseCallOption.class, CleanseCallOption.PRIOR_SET);
 		doubleTowerOnlyWithNoDebuff = new BooleanSetting(pers, settingsBase + "double-tower-no-debuff", false);
@@ -293,19 +295,22 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 
 				// The problem here is that the tethers come from dummy NPCs which are co-located with a non-combatant NPC which tells us which mechanic is which, but which don't on their
 				// own have identifying features.
-				boolean playerStone;
+				Boolean playerStone;
 				{
 					var rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
 					s.waitThenRefreshCombatants(100);
 					var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
 					var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
-					playerStone = myTetherFrom.getPos() != null && myTetherFrom.getPos().x() > 120;
+					playerStone = positionBeyond(myTetherFrom, 120);
 					s.setParam("playerStone", playerStone);
 				}
 
 				// Same fake/real ice
 				var bossHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE));
-				if (bossHm.markerIdMatches(FAKE_ICE)) {
+				if (playerStone == null) {
+					log.warn("Graven tether position unavailable");
+				}
+				else if (bossHm.markerIdMatches(FAKE_ICE)) {
 					s.updateCall(playerStone ? graven2fakeIceStone : graven2fakeIceDark);
 				}
 				else {
@@ -325,7 +330,9 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 
 				// Gravitas hits 4 players
 				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAAC));
-				s.updateCall(playerStone ? graven2dropFirstStone : graven2avoidFirstStone);
+				if (playerStone != null) {
+					s.updateCall(playerStone ? graven2dropFirstStone : graven2avoidFirstStone);
+				}
 				// BAB0 vitrophyre hits stone players
 				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAB0));
 
@@ -333,32 +340,34 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				var glowingHand1 = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
 				s.waitThenRefreshCombatants(100);
 				var glowingHand1Pos = state.getLatestCombatantData(glowingHand1.getTarget()).getPos();
-				boolean westSafe1 = glowingHand1Pos != null && glowingHand1Pos.x() > 100;
-
-				s.updateCall(westSafe1 ? graven2westSafe1 : graven2eastSafe1);
+				if (glowingHand1Pos != null) {
+					s.updateCall(glowingHand1Pos.x() > 100 ? graven2westSafe1 : graven2eastSafe1);
+				}
 				{
 					// Tethers again
 					var rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
 					s.waitThenRefreshCombatants(100);
 					var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
 					var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
-					playerStone = myTetherFrom.getPos() != null && myTetherFrom.getPos().x() > 120;
+					playerStone = positionBeyond(myTetherFrom, 120);
 					s.setParam("playerStone", playerStone);
 				}
 				// No ice with this set
-				s.updateCall(playerStone ? graven2stone2 : graven2dark2);
+				if (playerStone != null) {
+					s.updateCall(playerStone ? graven2stone2 : graven2dark2);
+				}
 				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAAC));
-				s.updateCall(playerStone ? graven2dropSecondStone : graven2avoidSecondStone);
+				if (playerStone != null) {
+					s.updateCall(playerStone ? graven2dropSecondStone : graven2avoidSecondStone);
+				}
 
 
 				var glowingHand2 = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
 				s.waitThenRefreshCombatants(200);
 				var glowingHand2Pos = state.getLatestCombatantData(glowingHand2.getTarget()).getPos();
-				boolean westSafe2 = glowingHand2Pos != null && glowingHand2Pos.x() > 100;
+				s.setParam("safeSpot2", glowingHand2Pos == null ? "Unknown" : glowingHand2Pos.x() > 100 ? WEST : EAST);
 
-				s.setParam("safeSpot2", westSafe2 ? WEST : EAST);
-
-				if (!confettis.isEmpty()) {
+				if (glowingHand2Pos != null && !confettis.isEmpty()) {
 					confettis.stream().filter(ba -> ba.getTarget().isThePlayer()).findAny()
 							.ifPresentOrElse(ba -> s.updateCall(gravenConfetti2, ba),
 									() -> s.updateCall(gravenNoConfetti2, confettis.get(0)));
@@ -409,7 +418,21 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 
 	private final ModifiableCallout<ActorControlExtraEvent> ttEarlyFakeGaze = new ModifiableCallout<>("TT: Fake Gaze (Early Call)", "Fake Gaze");
 	private final ModifiableCallout<ActorControlExtraEvent> ttEarlyRealGaze = new ModifiableCallout<>("TT: Real Gaze (Early Call)", "Real Gaze");
-	private final ModifiableCallout<?> ttElementMechanic = new ModifiableCallout<>("TT: Element Mechanics", "{actualSpread ? 'Spread' : 'Stack'} {fakeThunder ? 'In Thunder' : 'In Safe'}, Look {fakeGaze ? 'Towards' : 'Away'}");
+	private final ModifiableCallout<?> ttElementMechanic = new ModifiableCallout<>("TT: Element Mechanics", "{actualSpread ? 'Spread' : 'Stack'} {fakeThunder ? 'In Thunder' : 'In Safe'}{fakeGaze == null ? '' : fakeGaze ? ', Look Towards' : ', Look Away'}");
+
+	private static @Nullable Boolean positionBeyond(XivCombatant combatant, double x) {
+		Position position = combatant == null ? null : combatant.getPos();
+		return position == null ? null : position.x() > x;
+	}
+
+	private static boolean sameArrow(BuffApplied first, BuffApplied other) {
+		// Refreshes keep the same expiry as their remaining duration decreases.
+		return first.getBuff().equals(other.getBuff())
+				&& first.getTarget().equals(other.getTarget())
+				&& first.getSource().equals(other.getSource())
+				&& Duration.between(first.getEffectiveHappenedAt().plus(first.getInitialDuration()),
+				other.getEffectiveHappenedAt().plus(other.getInitialDuration())).abs().toMillis() < 1000;
+	}
 
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> ttSq = SqtTemplates.sq(180_000,
@@ -430,7 +453,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				try {
 					firstArrow = s.findOrWaitForBuff(buffs, arrowBuff);
 					BuffApplied first = firstArrow;
-					secondArrow = s.findOrWaitForBuff(buffs, ba -> arrowBuff.test(ba) && ba != first);
+					secondArrow = s.findOrWaitForBuff(buffs, ba -> arrowBuff.test(ba) && !sameArrow(first, ba));
 				}
 				catch (SequentialTriggerTimeoutException e) {
 					log.error("TT arrows never reached this trigger. Arrow buffs now in state: {}",
@@ -510,28 +533,30 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 									() -> s.updateCall(ttConfettiNotOnYou, confettis.get(0)));
 				}
 
-				boolean playerStone;
+				Boolean playerStone;
 				{
 					var rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
 					s.waitThenRefreshCombatants(100);
 					var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
 					var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
-					playerStone = myTetherFrom.getPos() != null && myTetherFrom.getPos().x() > 100;
+					playerStone = positionBeyond(myTetherFrom, 100);
 					s.setParam("playerStone", playerStone);
 				}
 				// This call will not overwrite the confetti call
-				var tetherCall = s.call(playerStone ? ttSleepTetherInitial : ttConfusionTetherInitial);
+				var tetherCall = playerStone == null ? null : s.call(playerStone ? ttSleepTetherInitial : ttConfusionTetherInitial);
 				if (!confettis.isEmpty()) { s.waitBuffRemoved(buffs, confettis.get(0)); }
-				tetherCall.forceExpire();
-				s.updateCall(playerStone ? ttSleepTether : ttConfuseTether);
+				if (tetherCall != null) {
+					tetherCall.forceExpire();
+					s.updateCall(playerStone ? ttSleepTether : ttConfuseTether);
+				}
 
 				var lookMechanic = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
 				s.waitThenRefreshCombatants(100);
 				var lookFrom = state.getLatestCombatantData(lookMechanic.getTarget());
-				boolean fakeGaze = lookFrom.getPos() != null && lookFrom.getPos().x() < 100;
+				Boolean fakeGaze = lookFrom.getPos() == null ? null : lookFrom.getPos().x() < 100;
 				s.setParam("fakeGaze", fakeGaze);
 				// This call is also in parallel
-				var gazeCall = s.call(fakeGaze ? ttEarlyFakeGaze : ttEarlyRealGaze, lookMechanic);
+				var gazeCall = fakeGaze == null ? null : s.call(fakeGaze ? ttEarlyFakeGaze : ttEarlyRealGaze, lookMechanic);
 
 				{
 					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_THUNDER, REAL_THUNDER));
@@ -543,7 +568,9 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					s.setParam("fakeFire", fakeFire);
 					s.setParam("fakeThunder", fakeThunder);
 					s.setParam("actualSpread", actuallySpread);
-					gazeCall.forceExpire();
+					if (gazeCall != null) {
+						gazeCall.forceExpire();
+					}
 					s.updateCall(ttElementMechanic);
 				}
 
@@ -2045,33 +2072,16 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 		return buffs.stream().filter(ba -> ba.buffIdMatches(ids)).findAny().orElse(null);
 	}
 
-	private static void markPair(SequentialTriggerController<?> s, List<BuffApplied> debuffs, long buffId, MarkerSign first, MarkerSign second) {
-		List<XivPlayerCharacter> holders = debuffs.stream()
-				.filter(ba -> ba.buffIdMatches(buffId))
-				.map(BuffApplied::getTarget)
-				.filter(XivPlayerCharacter.class::isInstance)
-				.map(XivPlayerCharacter.class::cast)
-				.toList();
-		if (!holders.isEmpty()) {
-			s.accept(new SpecificAutoMarkRequest(holders.get(0), first));
-			if (holders.size() > 1) {
-				s.accept(new SpecificAutoMarkRequest(holders.get(1), second));
-			}
+	@HandleEvents(order = 100)
+	public void maintainKefkaMarks(EventContext context, BaseEvent event) {
+		if (event instanceof WipeEvent || event instanceof PullStartedEvent
+				|| event instanceof ZoneChangeEvent
+				|| event instanceof AbilityCastStart cast && cast.abilityIdMatches(0xC2DC)) {
+			kefkaMarks.clear(context::accept);
 		}
-	}
-
-	private static void clearPairWhenResolved(SequentialTriggerController<?> s, StatusEffectRepository buffs, List<BuffApplied> debuffs, long buffId) {
-		List<BuffApplied> pair = debuffs.stream().filter(ba -> ba.buffIdMatches(buffId)).toList();
-		if (pair.isEmpty()) {
-			return;
+		else {
+			kefkaMarks.update(context::accept);
 		}
-		// Both debuffs of a pair resolve at the same time so waiting on one is enough
-		s.waitBuffRemoved(buffs, pair.get(0));
-		pair.stream()
-				.map(BuffApplied::getTarget)
-				.filter(XivPlayerCharacter.class::isInstance)
-				.map(XivPlayerCharacter.class::cast)
-				.forEach(player -> s.accept(new SpecificAutoMarkRequest(player, MarkerSign.CLEAR)));
 	}
 
 	private ModifiableCallout<BuffApplied> getDynEntCall(boolean isDynamic, boolean isLong, boolean isReal) {
@@ -2252,9 +2262,6 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				var myDebuffs1 = allDebuffs1.stream()
 						.filter(ba -> ba.getTarget().isThePlayer())
 						.toList();
-				markPair(s, allDebuffs1, FORK, MarkerSign.ATTACK1, MarkerSign.ATTACK2);
-				markPair(s, allDebuffs1, WATER, MarkerSign.BIND1, MarkerSign.BIND2);
-				markPair(s, allDebuffs1, SHRIEK, MarkerSign.IGNORE1, MarkerSign.IGNORE2);
 				BuffApplied myAccel1 = findById(myDebuffs1, ACCEL);
 				BuffApplied myShriek1 = findById(myDebuffs1, SHRIEK);
 				BuffApplied myWater1 = findById(myDebuffs1, WATER);
@@ -2313,6 +2320,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 							}
 						})
 						.toList();
+				kefkaMarks.start(Stream.concat(allDebuffs1.stream(), allDebuffs2.stream()).toList(), s::accept);
 				var myDebuffs2 = allDebuffs2.stream()
 						.filter(ba -> ba.getTarget().isThePlayer())
 						.toList();
@@ -2509,13 +2517,6 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					s.setParam("fakeShriek", fakeShriek);
 					s.updateCall(shortShriekYou == null ? ksThunderShriek : ksThunderShriekOnYou, shortShriek);
 				}
-				clearPairWhenResolved(s, buffs, allDebuffs1, FORK);
-				clearPairWhenResolved(s, buffs, allDebuffs1, WATER);
-				clearPairWhenResolved(s, buffs, allDebuffs1, SHRIEK);
-				s.accept(new ClearAutoMarkRequest());
-				markPair(s, allDebuffs2, FORK, MarkerSign.ATTACK1, MarkerSign.ATTACK2);
-				markPair(s, allDebuffs2, WATER, MarkerSign.BIND1, MarkerSign.BIND2);
-				markPair(s, allDebuffs2, SHRIEK, MarkerSign.IGNORE1, MarkerSign.IGNORE2);
 				var kefkaHm2 = s.waitEvent(HeadMarkerEvent.class, hme -> hme.eitherTargetMatches(cbt -> cbt.npcIdMatches(NPC_KEFKA)));
 				boolean fakeIce = kefkaHm2.markerIdMatches(FAKE_ICE);
 
@@ -2581,18 +2582,12 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 						}
 						s.waitBuffRemoved(buffs, stackBuff);
 					}
-
-					clearPairWhenResolved(s, buffs, allDebuffs2, FORK);
-					clearPairWhenResolved(s, buffs, allDebuffs2, WATER);
-
 					BuffApplied longShriek = buffs.findBuff(ba -> ba.buffIdMatches(SHRIEK) && ba.getEstimatedRemainingDuration().toSeconds() < 15);
 					BuffApplied longShriekOnYou = buffs.findBuff(ba -> ba.buffIdMatches(SHRIEK) && ba.getEstimatedRemainingDuration().toSeconds() < 15 && ba.getTarget().isThePlayer());
 					boolean fakeShriek = fakeDebuffs.contains(longShriek);
 					s.setParam("fakeShriek", fakeShriek);
 					s.updateCall(longShriekOnYou == null ? ksSecondShriek : ksSecondShriekOnYou, longShriek);
 				}
-				clearPairWhenResolved(s, buffs, allDebuffs2, SHRIEK);
-				s.accept(new ClearAutoMarkRequest());
 			});
 
 	@AutoFeed
