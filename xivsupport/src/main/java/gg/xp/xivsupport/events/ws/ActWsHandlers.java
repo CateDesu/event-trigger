@@ -35,7 +35,6 @@ import gg.xp.xivsupport.lang.GameLanguageInfoEvent;
 import gg.xp.xivsupport.models.XivCombatant;
 import gg.xp.xivsupport.models.XivEntity;
 import gg.xp.xivsupport.models.XivZone;
-import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.jackson.databind.node.StringNode;
@@ -217,11 +216,14 @@ public class ActWsHandlers {
 	}
 
 	@HandleEvents(order = -100)
-	public static void actWsZoneChange(EventContext context, ActWsJsonMsg jsonMsg) {
+	public void actWsZoneChange(EventContext context, ActWsJsonMsg jsonMsg) {
 		if ("ChangeZone".equals(jsonMsg.getType())) {
 			long id = jsonMsg.getJson().get("zoneID").intValue();
 			String name = jsonMsg.getJson().get("zoneName").textValue();
-			context.accept(new ZoneChangeEvent(new XivZone(id, name)));
+			// Subscriptions repeat the current zone when the connection returns.
+			if (!state.zoneIs(id)) {
+				context.accept(new ZoneChangeEvent(new XivZone(id, name)));
+			}
 		}
 	}
 
@@ -312,8 +314,12 @@ public class ActWsHandlers {
 //		}
 //	}
 
-	// TODO: clear on zone change
 	private final Map<Long, RawXivCombatantInfo> rawCbtCache = new HashMap<>();
+
+	@HandleEvents
+	public void clearCombatantCache(EventContext context, ZoneChangeEvent event) {
+		rawCbtCache.clear();
+	}
 
 	@HandleEvents(order = -100)
 	public void actWsCombatants(EventContext context, ActWsJsonMsg jsonMsg) {
@@ -322,7 +328,6 @@ public class ActWsHandlers {
 			boolean fullRefresh = "allCombatants".equals(jsonMsg.getRseq());
 			List<RawXivCombatantInfo> combatantMaps = mapper.convertValue(combatantsNode, new TypeReference<>() {
 			});
-			MutableBoolean hasUpdate = new MutableBoolean();
 			List<RawXivCombatantInfo> optimizedCombatantMaps = combatantMaps.stream().map(combatant -> {
 				long id = combatant.getId();
 				if (id == 0xE0000000L) {
@@ -336,14 +341,16 @@ public class ActWsHandlers {
 					}
 					else {
 						rawCbtCache.put(id, combatant);
-						hasUpdate.setTrue();
 						return combatant;
 					}
 				}
 			}).filter(Objects::nonNull).collect(Collectors.toList());
-			if (hasUpdate.getValue()) {
-				context.accept(new CombatantsUpdateRaw(optimizedCombatantMaps, fullRefresh));
+			if (fullRefresh) {
+				rawCbtCache.keySet().retainAll(optimizedCombatantMaps.stream()
+						.map(RawXivCombatantInfo::getId).collect(Collectors.toSet()));
 			}
+			// Missing actors and actors removed by log events also change state.
+			context.accept(new CombatantsUpdateRaw(optimizedCombatantMaps, fullRefresh));
 		}
 	}
 }
