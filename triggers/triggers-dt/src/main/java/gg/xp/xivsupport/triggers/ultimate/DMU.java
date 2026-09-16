@@ -183,198 +183,216 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	 */
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> gravenImageSq = SqtTemplates.multiInvocation(120_000,
-			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBCF2),
+	private final SequentialTrigger<BaseEvent> gravenImageSq = SqtTemplates.sq(120_000,
+			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBCF2) && !this.ttSq.isActive(),
 			(e1, s) -> {
 				s.updateCall(gravenImage, e1);
-				List<TetherEvent> initialTethers = s.waitEventsQuickSuccession(4, TetherEvent.class, hme -> true);
-				Optional<TetherEvent> myTether = initialTethers.stream().filter(t -> t.eitherTargetMatches(XivCombatant::isThePlayer)).findAny();
-				if (myTether.isPresent()) {
-					s.updateCall(graven1Tether, myTether.get());
-				}
-				else {
-					s.updateCall(graven1NoTether);
-				}
-
-				// These two presumably indicate mechanics
-				/*
-				Example 1: 4:09PM fake ice, spread
-					2 double fake
-
-				Example 2: 4:32 fake fake (stack) 675 and 673 on boss, 127 on all players
-						Fake ice (BA9E, BA9B), mystery magic BA94
-						4s hit with fire BAA3
-				2 all real 676 and 678, thunder ba9f, blizzard ba 98
-
-				4:38PM all fake (stand in both and stack) fake spread
-					675, 673, 8x 127
-				second set 676 678
-
-
-				fake ice + real spread
-
-				fake lightning
-
-				based on this:
-				673 0x2A1 fake fire spread (should actually stack)
-				674 0x2A2 real fire spread (should really spread)
-				675 0x2A3 fake ice cleave (go in cones)
-				676 0x2A4 real ice cleave (avoid cones)
-				677 0x2A5 fake thunder (go in the lines)
-				678 0x2A6 real thunder (avoid lines)
-				 */
-
-				// 4:59PM wrong call - should have been spread
-				// 5:13PM ice was right but not stack/spread - players had a stack marker, so it was fake stack i.e. spread
-				// so we do need the player HM after all
-				// stack is HM 128, spread is 127
-
-				{
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE));
-					var playerHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(127, 128));
-					boolean fakeFire = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(673));
-					boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));
-					boolean presentSpread = playerHm.markerIdMatches(127);
-					boolean actuallySpread = presentSpread != fakeFire;
-					s.setParam("fakeFire", fakeFire);
-					s.setParam("fakeIce", fakeIce);
-					var hm1 = kefkaHM.get(0);
-					if (actuallySpread) {
-						s.updateCall(fakeIce ? gravenFakeIceSpread : gravenRealIceSpread, hm1);
-					}
-					else {
-						s.updateCall(fakeIce ? gravenFakeIceStack : gravenRealIceStack, hm1);
-					}
-				}
-
-				s.waitMs(6_000);
-				s.updateCall(gravenSpreadForLaser);
-				List<AbilityUsedEvent> laserTargets = s.waitEventsQuickSuccession(4,
-						AbilityUsedEvent.class,
-						aue -> aue.abilityIdMatches(0xBAA8) && aue.isFirstTarget());
-				laserTargets.stream().filter(lt -> lt.getTarget().isThePlayer()).findAny().ifPresentOrElse(
-						myLaser -> {
-							s.updateCall(gravenAvoidTower, myLaser);
-						}, () -> {
-							var towerCast = s.findOrWaitForCast(casts, acs -> acs.abilityIdMatches(0xBAAA), false);
-							s.updateCall(gravenTakeTower, towerCast);
-						}
-				);
-				var confettis = s.waitEventsQuickSuccession(2, BuffApplied.class, ba -> ba.buffIdMatches(0x13D6));
-				// TODO: sort this with self first
-				var confettiPlayers = confettis.stream().map(BuffApplied::getTarget).toList();
-				s.setParam("confettiPlayers", confettiPlayers);
-				if (!confettis.isEmpty()) {
-					confettis.stream().filter(cf -> cf.getTarget().isThePlayer()).findAny().ifPresentOrElse(
-							myCf -> s.updateCall(gravenConfetti, myCf),
-							() -> s.updateCall(gravenNoConfetti, confettis.get(0)));
-				}
-
-				{
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER));
-					boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(677));
-					boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));
-					s.setParam("fakeThunder", fakeThunder);
-					s.setParam("fakeIce", fakeIce);
-					var hm1 = kefkaHM.get(0);
-					if (fakeThunder) {
-						s.updateCall(fakeIce ? gravenFakeIceFakeThunder : gravenRealIceFakeThunder, hm1);
-					}
-					else {
-						s.updateCall(fakeIce ? gravenFakeIceRealThunder : gravenRealIceRealThunder, hm1);
-					}
-				}
-			}, (e1, s) -> {
-				log.info("Graven 2: Start");
-				// These carry over from before the cast
 				List<BuffApplied> confettis = buffs.findBuffsById(0x13D6);
-				s.setParam("confettis", confettis);
-				// TODO: sort this with self first
-				var confettiPlayers = confettis.stream().map(BuffApplied::getTarget).toList();
-				s.setParam("confettiPlayers", confettiPlayers);
-
-				// The problem here is that the tethers come from dummy NPCs which are co-located with a non-combatant NPC which tells us which mechanic is which, but which don't on their
-				// own have identifying features.
-				Boolean playerStone;
-				{
-					var rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
-					s.waitThenRefreshCombatants(100);
-					var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
-					var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
-					playerStone = positionBeyond(myTetherFrom, 120);
-					s.setParam("playerStone", playerStone);
+				// The tether set identifies the mechanic even when the first cast was missed.
+				List<TetherEvent> tethers = s.waitEventsQuickSuccession(8, TetherEvent.class,
+						te -> te.tetherIdMatches(45));
+				if (tethers.size() == 4) {
+					gravenImageFirst(s, tethers);
 				}
-
-				// Same fake/real ice
-				var bossHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE));
-				if (playerStone == null) {
-					log.warn("Graven tether position unavailable");
-				}
-				else if (bossHm.markerIdMatches(FAKE_ICE)) {
-					s.updateCall(playerStone ? graven2fakeIceStone : graven2fakeIceDark);
+				else if (tethers.size() == 8) {
+					gravenImageSecond(s, tethers, confettis);
 				}
 				else {
-					s.updateCall(playerStone ? graven2realIceStone : graven2realIceDark);
+					log.warn("Graven Image received an incomplete tether set: {}", tethers.size());
 				}
-				// 2 stone players would split off but we need to figure out how to identify stone tethers
-				// Then, half room cleave + tankbuster.
-				// Half room cleave is which hand up north starts glowing. But what is this? ActorControlExtra?
-				// West safe had ACEE 19D 40:80:0:0 on 2015165 @ (116, 43, 6.5)
-				// East safe had ACEE 19D 40:80:0:0 on 2015165 @ (92, 27, 15)
-
-				// North is always dark
-				// Then, tethers again
-				// Then, stack again, but not on the original stack.
-				// Stones split off again
-				// Finally, confetti stacks resolve in the bad spots
-
-				// Gravitas hits 4 players
-				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAAC));
-				if (playerStone != null) {
-					s.updateCall(playerStone ? graven2dropFirstStone : graven2avoidFirstStone);
-				}
-				// BAB0 vitrophyre hits stone players
-				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAB0));
-
-				// Buster already handled by another trigger. Ignore it.
-				var glowingHand1 = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
-				s.waitThenRefreshCombatants(100);
-				var glowingHand1Pos = state.getLatestCombatantData(glowingHand1.getTarget()).getPos();
-				if (glowingHand1Pos != null) {
-					s.updateCall(glowingHand1Pos.x() > 100 ? graven2westSafe1 : graven2eastSafe1);
-				}
-				{
-					// Tethers again
-					var rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
-					s.waitThenRefreshCombatants(100);
-					var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
-					var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
-					playerStone = positionBeyond(myTetherFrom, 120);
-					s.setParam("playerStone", playerStone);
-				}
-				// No ice with this set
-				if (playerStone != null) {
-					s.updateCall(playerStone ? graven2stone2 : graven2dark2);
-				}
-				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAAC));
-				if (playerStone != null) {
-					s.updateCall(playerStone ? graven2dropSecondStone : graven2avoidSecondStone);
-				}
-
-
-				var glowingHand2 = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
-				s.waitThenRefreshCombatants(200);
-				var glowingHand2Pos = state.getLatestCombatantData(glowingHand2.getTarget()).getPos();
-				s.setParam("safeSpot2", glowingHand2Pos == null ? "Unknown" : glowingHand2Pos.x() > 100 ? WEST : EAST);
-
-				if (glowingHand2Pos != null && !confettis.isEmpty()) {
-					confettis.stream().filter(ba -> ba.getTarget().isThePlayer()).findAny()
-							.ifPresentOrElse(ba -> s.updateCall(gravenConfetti2, ba),
-									() -> s.updateCall(gravenNoConfetti2, confettis.get(0)));
-				}
-				s.waitMs(9_000);
-				s.updateCall(gravenFinalSoaks);
 			});
+
+	private void gravenImageFirst(SequentialTriggerController<BaseEvent> s, List<TetherEvent> initialTethers) {
+		Optional<TetherEvent> myTether = initialTethers.stream().filter(t -> t.eitherTargetMatches(XivCombatant::isThePlayer)).findAny();
+		if (myTether.isPresent()) {
+			s.updateCall(graven1Tether, myTether.get());
+		}
+		else {
+			s.updateCall(graven1NoTether);
+		}
+
+		// These two presumably indicate mechanics
+		/*
+		Example 1: 4:09PM fake ice, spread
+			2 double fake
+
+		Example 2: 4:32 fake fake (stack) 675 and 673 on boss, 127 on all players
+				Fake ice (BA9E, BA9B), mystery magic BA94
+				4s hit with fire BAA3
+		2 all real 676 and 678, thunder ba9f, blizzard ba 98
+
+		4:38PM all fake (stand in both and stack) fake spread
+			675, 673, 8x 127
+		second set 676 678
+
+
+		fake ice + real spread
+
+		fake lightning
+
+		based on this:
+		673 0x2A1 fake fire spread (should actually stack)
+		674 0x2A2 real fire spread (should really spread)
+		675 0x2A3 fake ice cleave (go in cones)
+		676 0x2A4 real ice cleave (avoid cones)
+		677 0x2A5 fake thunder (go in the lines)
+		678 0x2A6 real thunder (avoid lines)
+		 */
+
+		// 4:59PM wrong call - should have been spread
+		// 5:13PM ice was right but not stack/spread - players had a stack marker, so it was fake stack i.e. spread
+		// so we do need the player HM after all
+		// stack is HM 128, spread is 127
+
+		{
+			List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE));
+			var playerHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(127, 128));
+			boolean fakeFire = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(673));
+			boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));
+			boolean presentSpread = playerHm.markerIdMatches(127);
+			boolean actuallySpread = presentSpread != fakeFire;
+			s.setParam("fakeFire", fakeFire);
+			s.setParam("fakeIce", fakeIce);
+			var hm1 = kefkaHM.get(0);
+			if (actuallySpread) {
+				s.updateCall(fakeIce ? gravenFakeIceSpread : gravenRealIceSpread, hm1);
+			}
+			else {
+				s.updateCall(fakeIce ? gravenFakeIceStack : gravenRealIceStack, hm1);
+			}
+		}
+
+		s.waitMs(6_000);
+		s.updateCall(gravenSpreadForLaser);
+		List<AbilityUsedEvent> laserTargets = s.waitEventsQuickSuccession(4,
+				AbilityUsedEvent.class,
+				aue -> aue.abilityIdMatches(0xBAA8) && aue.isFirstTarget());
+		laserTargets.stream().filter(lt -> lt.getTarget().isThePlayer()).findAny().ifPresentOrElse(
+				myLaser -> {
+					s.updateCall(gravenAvoidTower, myLaser);
+				}, () -> {
+					var towerCast = s.findOrWaitForCast(casts, acs -> acs.abilityIdMatches(0xBAAA), false);
+					s.updateCall(gravenTakeTower, towerCast);
+				}
+		);
+		var confettis = s.waitEventsQuickSuccession(2, BuffApplied.class, ba -> ba.buffIdMatches(0x13D6));
+		// TODO: sort this with self first
+		var confettiPlayers = confettis.stream().map(BuffApplied::getTarget).toList();
+		s.setParam("confettiPlayers", confettiPlayers);
+		if (!confettis.isEmpty()) {
+			confettis.stream().filter(cf -> cf.getTarget().isThePlayer()).findAny().ifPresentOrElse(
+					myCf -> s.updateCall(gravenConfetti, myCf),
+					() -> s.updateCall(gravenNoConfetti, confettis.get(0)));
+		}
+
+		{
+			List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER));
+			boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(677));
+			boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));
+			s.setParam("fakeThunder", fakeThunder);
+			s.setParam("fakeIce", fakeIce);
+			var hm1 = kefkaHM.get(0);
+			if (fakeThunder) {
+				s.updateCall(fakeIce ? gravenFakeIceFakeThunder : gravenRealIceFakeThunder, hm1);
+			}
+			else {
+				s.updateCall(fakeIce ? gravenFakeIceRealThunder : gravenRealIceRealThunder, hm1);
+			}
+		}
+	}
+
+	private void gravenImageSecond(SequentialTriggerController<BaseEvent> s, List<TetherEvent> rawTethers,
+	                               List<BuffApplied> confettis) {
+		log.info("Graven 2: Start");
+		s.setParam("confettis", confettis);
+		var confettiPlayers = confettis.stream().map(BuffApplied::getTarget).toList();
+		s.setParam("confettiPlayers", confettiPlayers);
+		// The problem here is that the tethers come from dummy NPCs which are co-located with a non-combatant NPC which tells us which mechanic is which, but which don't on their
+		// own have identifying features.
+		Boolean playerStone;
+		{
+			s.waitThenRefreshCombatants(100);
+			var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
+			var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
+			playerStone = positionBeyond(myTetherFrom, 120);
+			s.setParam("playerStone", playerStone);
+		}
+
+		// Same fake/real ice
+		var bossHm = s.waitEvent(HeadMarkerEvent.class,
+				hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER));
+		// Tele trouncing also casts Graven Image and has eight tethers.
+		if (!bossHm.markerIdMatches(FAKE_ICE, REAL_ICE)) {
+			return;
+		}
+		if (playerStone == null) {
+			log.warn("Graven tether position unavailable");
+		}
+		else if (bossHm.markerIdMatches(FAKE_ICE)) {
+			s.updateCall(playerStone ? graven2fakeIceStone : graven2fakeIceDark);
+		}
+		else {
+			s.updateCall(playerStone ? graven2realIceStone : graven2realIceDark);
+		}
+		// 2 stone players would split off but we need to figure out how to identify stone tethers
+		// Then, half room cleave + tankbuster.
+		// Half room cleave is which hand up north starts glowing. But what is this? ActorControlExtra?
+		// West safe had ACEE 19D 40:80:0:0 on 2015165 @ (116, 43, 6.5)
+		// East safe had ACEE 19D 40:80:0:0 on 2015165 @ (92, 27, 15)
+
+		// North is always dark
+		// Then, tethers again
+		// Then, stack again, but not on the original stack.
+		// Stones split off again
+		// Finally, confetti stacks resolve in the bad spots
+
+		// Gravitas hits 4 players
+		s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAAC));
+		if (playerStone != null) {
+			s.updateCall(playerStone ? graven2dropFirstStone : graven2avoidFirstStone);
+		}
+		// BAB0 vitrophyre hits stone players
+		s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAB0));
+
+		// Buster already handled by another trigger. Ignore it.
+		var glowingHand1 = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
+		s.waitThenRefreshCombatants(100);
+		var glowingHand1Pos = state.getLatestCombatantData(glowingHand1.getTarget()).getPos();
+		if (glowingHand1Pos != null) {
+			s.updateCall(glowingHand1Pos.x() > 100 ? graven2westSafe1 : graven2eastSafe1);
+		}
+		{
+			// Tethers again
+			rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
+			s.waitThenRefreshCombatants(100);
+			var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElseThrow();
+			var myTetherFrom = state.getLatestCombatantData(myTether.getTargetMatching(cbt -> !cbt.isPc()));
+			playerStone = positionBeyond(myTetherFrom, 120);
+			s.setParam("playerStone", playerStone);
+		}
+		// No ice with this set
+		if (playerStone != null) {
+			s.updateCall(playerStone ? graven2stone2 : graven2dark2);
+		}
+		s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBAAC));
+		if (playerStone != null) {
+			s.updateCall(playerStone ? graven2dropSecondStone : graven2avoidSecondStone);
+		}
+
+
+		var glowingHand2 = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
+		s.waitThenRefreshCombatants(200);
+		var glowingHand2Pos = state.getLatestCombatantData(glowingHand2.getTarget()).getPos();
+		s.setParam("safeSpot2", glowingHand2Pos == null ? "Unknown" : glowingHand2Pos.x() > 100 ? WEST : EAST);
+
+		if (glowingHand2Pos != null && !confettis.isEmpty()) {
+			confettis.stream().filter(ba -> ba.getTarget().isThePlayer()).findAny()
+					.ifPresentOrElse(ba -> s.updateCall(gravenConfetti2, ba),
+							() -> s.updateCall(gravenNoConfetti2, confettis.get(0)));
+		}
+		s.waitMs(9_000);
+		s.updateCall(gravenFinalSoaks);
+	}
 
 
 	@NpcCastCallout({0xC622, 0xBABD})
@@ -2542,7 +2560,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 						else {
 							s.updateCall(fake ? ksSecondBombSetStack : ksSecondBombSetSpread, myFork);
 						}
-						s.waitBuffRemoved(buffs, myWater);
+						s.waitBuffRemoved(buffs, myFork);
 					}
 					else if (myWater != null) {
 						// Fork is naturally stack
@@ -2580,7 +2598,9 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 						else {
 							s.updateCall(ksSecondBombSetNothing, stackBuff);
 						}
-						s.waitBuffRemoved(buffs, stackBuff);
+						if (stackBuff != null) {
+							s.waitBuffRemoved(buffs, stackBuff);
+						}
 					}
 					BuffApplied longShriek = buffs.findBuff(ba -> ba.buffIdMatches(SHRIEK) && ba.getEstimatedRemainingDuration().toSeconds() < 15);
 					BuffApplied longShriekOnYou = buffs.findBuff(ba -> ba.buffIdMatches(SHRIEK) && ba.getEstimatedRemainingDuration().toSeconds() < 15 && ba.getTarget().isThePlayer());
