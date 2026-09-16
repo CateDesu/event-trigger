@@ -6,6 +6,11 @@ import gg.xp.reevent.events.EventContext;
 import gg.xp.reevent.events.EventHandler;
 import gg.xp.reevent.events.EventMaster;
 import gg.xp.xivsupport.events.ACTLogLineEvent;
+import gg.xp.xivsupport.events.actlines.events.WipeEvent;
+import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
+import gg.xp.xivsupport.events.actlines.events.actorcontrol.DutyCommenceEvent;
+import gg.xp.xivsupport.events.actlines.parsers.ActLineParseFailureEvent;
+import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
 import gg.xp.xivsupport.events.ws.ActWsRawMsg;
 import gg.xp.xivsupport.sys.KnownLogSource;
@@ -19,6 +24,9 @@ import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 /** Restores trigger waits using event time before resuming the live feed. */
 public final class PullRecovery implements EventHandler<Event> {
@@ -29,6 +37,8 @@ public final class PullRecovery implements EventHandler<Event> {
     private final PrimaryLogSource source;
     private final ObjectMapper mapper = new ObjectMapper();
     private volatile Instant inputTime;
+    private final AtomicInteger skipped = new AtomicInteger();
+    private final AtomicLong outputGeneration = new AtomicLong();
 
     public PullRecovery(RecoveryClock clock, RecoveryQueue queue, EventMaster master, PrimaryLogSource source) {
         this.clock = clock;
@@ -40,6 +50,8 @@ public final class PullRecovery implements EventHandler<Event> {
     public void begin(String timestamp) {
         master.pushEventAndWait(new Tick());
         clock.begin(Instant.parse(timestamp));
+        cancelPendingOutput();
+        skipped.set(0);
         source.setLogSource(KnownLogSource.ACT_LOG_FILE);
     }
 
@@ -59,13 +71,13 @@ public final class PullRecovery implements EventHandler<Event> {
             result = new PullHistoryReader.Result(List.of(), error.toString());
         }
         begin((result.lines().isEmpty() ? fallback : result.start()).toString());
-        int skipped = result.skipped();
+        skipped.addAndGet(result.skipped());
         for (String snapshot : snapshots) {
             try {
                 feed(snapshot, mapper.readTree(snapshot));
             }
             catch (RuntimeException error) {
-                skipped++;
+                recordFailure();
             }
         }
         for (String line : result.lines()) {
@@ -74,10 +86,10 @@ public final class PullRecovery implements EventHandler<Event> {
                 feed(raw, mapper.readTree(raw));
             }
             catch (RuntimeException error) {
-                skipped++;
+                recordFailure();
             }
         }
-        return new PullHistoryReader.Result(result.lines(), result.reason(), skipped);
+        return new PullHistoryReader.Result(result.lines(), result.reason(), skipped());
     }
 
     public void end() {
@@ -130,6 +142,26 @@ public final class PullRecovery implements EventHandler<Event> {
                 && (input == null || !input.isBefore(cutoff));
     }
 
+    public void recordFailure() {
+        if (clock.replaying()) {
+            skipped.incrementAndGet();
+        }
+    }
+
+    public int skipped() {
+        return skipped.get();
+    }
+
+    public void cancelPendingOutput() {
+        outputGeneration.incrementAndGet();
+    }
+
+    /** A queued output may wait for its configured delay within the same pull. */
+    public BooleanSupplier outputPermit() {
+        long generation = outputGeneration.get();
+        return () -> !clock.replaying() && outputGeneration.get() == generation;
+    }
+
     @Override
     public int getOrder() {
         return Integer.MIN_VALUE;
@@ -137,6 +169,13 @@ public final class PullRecovery implements EventHandler<Event> {
 
     @Override
     public void handle(EventContext context, Event event) {
+        if (event instanceof ActLineParseFailureEvent) {
+            recordFailure();
+        }
+        if (event instanceof ZoneChangeEvent || event instanceof WipeEvent
+                || event instanceof DutyCommenceEvent || event instanceof PullStartedEvent) {
+            cancelPendingOutput();
+        }
         if (event instanceof BaseEvent base) {
             base.setTimeSource(clock);
             if (!(event instanceof ACTLogLineEvent)

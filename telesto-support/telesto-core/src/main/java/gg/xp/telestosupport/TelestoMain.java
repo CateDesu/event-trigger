@@ -33,7 +33,9 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public class TelestoMain implements FilteredEventHandler {
 
@@ -58,9 +60,16 @@ public class TelestoMain implements FilteredEventHandler {
 	private final IntSetting commandDelayBase;
 	private final IntSetting commandDelayPlus;
 	private volatile Predicate<TelestoOutgoingMessage> outgoingGate = message -> true;
+	private volatile Supplier<BooleanSupplier> deliveryPermit = () -> () -> true;
 
+	/** Check freshness before the configured delay starts. */
 	public void setOutgoingGate(Predicate<TelestoOutgoingMessage> gate) {
 		outgoingGate = gate;
+	}
+
+	/** Capture cancellation state before a message enters the delay queue. */
+	public void setDeliveryPermit(Supplier<BooleanSupplier> permit) {
+		deliveryPermit = permit;
 	}
 
 	public TelestoMain(EventMaster master, PersistenceProvider pers, PrimaryLogSource pls) {
@@ -142,7 +151,15 @@ public class TelestoMain implements FilteredEventHandler {
 	}
 
 	public @Nullable HttpResponse<String> sendMessageDirectly(TelestoOutgoingMessage msg) {
+		BooleanSupplier permit = deliveryPermit.get();
 		if (!enabled() || !outgoingGate.test(msg)) {
+			return null;
+		}
+		return sendMessageDirectly(msg, permit);
+	}
+
+	private @Nullable HttpResponse<String> sendMessageDirectly(TelestoOutgoingMessage msg, BooleanSupplier permit) {
+		if (!enabled() || !permit.getAsBoolean()) {
 			return null;
 		}
 		String body;
@@ -177,13 +194,14 @@ public class TelestoMain implements FilteredEventHandler {
 
 	@HandleEvents
 	public void handleMessage(EventContext context, TelestoOutgoingMessage msg) {
-		if (!outgoingGate.test(msg)) {
+		BooleanSupplier permit = deliveryPermit.get();
+		if (!enabled() || !outgoingGate.test(msg)) {
 			return;
 		}
 		Runnable task = () -> {
 			try {
 				log.trace("Telesto message done");
-				HttpResponse<String> response = sendMessageDirectly(msg);
+				HttpResponse<String> response = sendMessageDirectly(msg, permit);
 				if (response == null) {
 					return;
 				}
@@ -211,6 +229,9 @@ public class TelestoMain implements FilteredEventHandler {
 		};
 		if (msg.shouldDelay()) {
 			queueExs.submit(() -> {
+				if (!permit.getAsBoolean()) {
+					return;
+				}
 				try {
 					// Insert delay to avoid spamming
 					int delay = (int) (commandDelayBase.get() + (Math.random() * commandDelayPlus.get()));

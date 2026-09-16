@@ -110,6 +110,7 @@ public abstract class AbstractACTLineParser<F extends Enum<F>> {
 			}
 		}
 		catch (Throwable t) {
+			context.accept(new ActLineParseFailureEvent(event.getLineNumber()));
 			throw new ActLineParseException(event.getLogLine(), t);
 		}
 	}
