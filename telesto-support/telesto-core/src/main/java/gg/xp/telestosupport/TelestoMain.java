@@ -33,6 +33,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Predicate;
 
 public class TelestoMain implements FilteredEventHandler {
 
@@ -56,6 +57,11 @@ public class TelestoMain implements FilteredEventHandler {
 	private final PrimaryLogSource pls;
 	private final IntSetting commandDelayBase;
 	private final IntSetting commandDelayPlus;
+	private volatile Predicate<TelestoOutgoingMessage> outgoingGate = message -> true;
+
+	public void setOutgoingGate(Predicate<TelestoOutgoingMessage> gate) {
+		outgoingGate = gate;
+	}
 
 	public TelestoMain(EventMaster master, PersistenceProvider pers, PrimaryLogSource pls) {
 		this.master = master;
@@ -136,7 +142,7 @@ public class TelestoMain implements FilteredEventHandler {
 	}
 
 	public @Nullable HttpResponse<String> sendMessageDirectly(TelestoOutgoingMessage msg) {
-		if (!enabled()) {
+		if (!enabled() || !outgoingGate.test(msg)) {
 			return null;
 		}
 		String body;
@@ -171,6 +177,9 @@ public class TelestoMain implements FilteredEventHandler {
 
 	@HandleEvents
 	public void handleMessage(EventContext context, TelestoOutgoingMessage msg) {
+		if (!outgoingGate.test(msg)) {
+			return;
+		}
 		Runnable task = () -> {
 			try {
 				log.trace("Telesto message done");

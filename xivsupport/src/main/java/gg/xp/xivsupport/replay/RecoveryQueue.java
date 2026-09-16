@@ -31,6 +31,7 @@ public final class RecoveryQueue extends BasicEventQueue {
             timers.add(new Timer(clock.now().plusMillis(Math.max(0, at - basis)), order++, event));
         }
         else {
+            releaseTimers();
             ready.add(event);
         }
         notifyAll();

@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.DateTimeException;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -30,7 +31,11 @@ public final class PullHistoryReader {
         this.maxHistoryBytes = maxHistoryBytes;
     }
 
-    public record Result(List<String> lines, String reason) {
+    public record Result(List<String> lines, String reason, int skipped) {
+        public Result(List<String> lines, String reason) {
+            this(lines, reason, 0);
+        }
+
         public Instant start() {
             return ZonedDateTime.parse(lines.get(0).split("\\|", 3)[1]).toInstant();
         }
@@ -89,6 +94,7 @@ public final class PullHistoryReader {
         private long zone = -1;
         private long bytes;
         private boolean collecting;
+        private int skipped;
         private final long maxHistoryBytes;
         private final List<String> history = new ArrayList<>();
         private final Map<String, String> combatants = new LinkedHashMap<>();
@@ -109,6 +115,7 @@ public final class PullHistoryReader {
             String[] parts = line.split("\\|", -1);
             try {
                 int kind = Integer.parseInt(parts[0]);
+                ZonedDateTime.parse(parts[1]);
                 switch (kind) {
                     case 1 -> {
                         zone = Long.parseLong(parts[2], 16);
@@ -181,7 +188,8 @@ public final class PullHistoryReader {
                     }
                 }
             }
-            catch (NumberFormatException | IndexOutOfBoundsException ignored) {
+            catch (NumberFormatException | IndexOutOfBoundsException | DateTimeException ignored) {
+                skipped++;
                 // An incomplete log line cannot establish a recovery boundary.
             }
         }
@@ -214,7 +222,7 @@ public final class PullHistoryReader {
                 lines.add(line.append("|0").toString());
             });
             lines.addAll(history.subList(1, history.size()));
-            return new Result(List.copyOf(lines), "");
+            return new Result(List.copyOf(lines), "", skipped);
         }
     }
 }

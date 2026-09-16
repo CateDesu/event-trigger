@@ -28,6 +28,7 @@ public final class PullRecovery implements EventHandler<Event> {
     private final EventMaster master;
     private final PrimaryLogSource source;
     private final ObjectMapper mapper = new ObjectMapper();
+    private volatile Instant inputTime;
 
     public PullRecovery(RecoveryClock clock, RecoveryQueue queue, EventMaster master, PrimaryLogSource source) {
         this.clock = clock;
@@ -58,14 +59,25 @@ public final class PullRecovery implements EventHandler<Event> {
             result = new PullHistoryReader.Result(List.of(), error.toString());
         }
         begin((result.lines().isEmpty() ? fallback : result.start()).toString());
+        int skipped = result.skipped();
         for (String snapshot : snapshots) {
-            feed(snapshot, mapper.readTree(snapshot));
+            try {
+                feed(snapshot, mapper.readTree(snapshot));
+            }
+            catch (RuntimeException error) {
+                skipped++;
+            }
         }
         for (String line : result.lines()) {
-            String raw = mapper.writeValueAsString(Map.of("type", "LogLine", "rawLine", line));
-            feed(raw, mapper.readTree(raw));
+            try {
+                String raw = mapper.writeValueAsString(Map.of("type", "LogLine", "rawLine", line));
+                feed(raw, mapper.readTree(raw));
+            }
+            catch (RuntimeException error) {
+                skipped++;
+            }
         }
-        return result;
+        return new PullHistoryReader.Result(result.lines(), result.reason(), skipped);
     }
 
     public void end() {
@@ -76,26 +88,46 @@ public final class PullRecovery implements EventHandler<Event> {
     }
 
     public void advance(Instant time) {
-        if (!clock.replaying()) {
-            clock.follow(time);
-            return;
+        boolean ticking = clock.hold();
+        try {
+            if (ticking) {
+                master.pushEventAndWait(new Tick());
+            }
+            Instant next;
+            while ((next = queue.nextTimer()) != null && !next.isAfter(time)) {
+                queue.advance(next);
+                master.pushEventAndWait(new Tick());
+            }
+            queue.advance(time);
         }
-        Instant next;
-        while ((next = queue.nextTimer()) != null && !next.isAfter(time)) {
-            queue.advance(next);
-            master.pushEventAndWait(new Tick());
+        finally {
+            if (ticking) {
+                clock.release();
+            }
         }
-        queue.advance(time);
     }
 
     public void feed(String raw, JsonNode frame) {
-        if ("LogLine".equals(frame.path("type").asText(""))) {
-            String[] parts = frame.path("rawLine").asText("").split("\\|", 3);
-            if (parts.length >= 3) {
-                advance(ZonedDateTime.parse(parts[1]).toInstant());
+        try {
+            if ("LogLine".equals(frame.path("type").asText(""))) {
+                String[] parts = frame.path("rawLine").asText("").split("\\|", 3);
+                if (parts.length >= 3) {
+                    inputTime = ZonedDateTime.parse(parts[1]).toInstant();
+                    advance(inputTime);
+                }
             }
+            master.pushEventAndWait(new ActWsRawMsg(raw));
         }
-        master.pushEventAndWait(new ActWsRawMsg(raw));
+        finally {
+            inputTime = null;
+        }
+    }
+
+    public boolean outputAllowed() {
+        Instant cutoff = Instant.now().minusSeconds(3);
+        Instant input = inputTime;
+        return !clock.replaying() && !clock.now().isBefore(cutoff)
+                && (input == null || !input.isBefore(cutoff));
     }
 
     @Override

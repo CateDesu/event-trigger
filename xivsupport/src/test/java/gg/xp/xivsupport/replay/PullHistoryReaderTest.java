@@ -35,6 +35,16 @@ public class PullHistoryReaderTest {
     }
 
     @Test
+    public void skipsMalformedTimestampsAndKeepsLaterHistory() throws Exception {
+        String later = line(0, 12, "0038|Player|Valid event");
+        var result = read(ZONE, PLAYER, "00|invalid|0038|Player|Damaged event|0", later, ANCHOR);
+        Assert.assertEquals(result.lines(), List.of(ZONE, PLAYER, later));
+        Assert.assertEquals(result.skipped(), 1);
+        Assert.assertEquals(result.reason(), "");
+        Assert.assertEquals(result.start().toString(), "2026-09-16T02:00:02Z");
+    }
+
+    @Test
     public void restoresPreAnnouncementPositionOnlyWhenTheActorIsSeenAgain() throws Exception {
         String change = line(261, 4, "Change|40000003|Heading|1");
         var result = read(OBJECT, ZONE, PLAYER, change, ANCHOR);

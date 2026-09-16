@@ -1,6 +1,7 @@
 package gg.xp.xivsupport.replay;
 
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
+import gg.xp.reevent.events.BaseEvent;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -35,6 +36,26 @@ public class RecoveryQueueTest {
         Assert.assertEquals(clock.now(), start.plusSeconds(1));
         queue.advance(start.plusMillis(1500));
         Assert.assertSame(queue.pull(), chained);
+    }
+
+    @Test
+    public void dueTimerPrecedesNewInputAfterLiveClockAdvance() {
+        var clock = new RecoveryClock();
+        var queue = new RecoveryQueue(clock);
+        var start = Instant.now();
+        clock.begin(start);
+        var timer = new Timer(1000);
+        queue.push(timer);
+        clock.resume();
+        Assert.assertTrue(clock.hold());
+        queue.advance(start.plusSeconds(2));
+        var input = new BaseEvent() {};
+        queue.push(input);
+        Assert.assertSame(queue.pull(), timer);
+        Assert.assertSame(queue.pull(), input);
+        Assert.assertFalse(clock.replaying());
+        clock.release();
+        Assert.assertFalse(clock.now().isBefore(start.plusSeconds(2)));
     }
 
     @Test
