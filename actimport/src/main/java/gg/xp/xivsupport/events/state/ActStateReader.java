@@ -20,7 +20,8 @@ public final class ActStateReader implements ActImportOnly {
 		this.xivState = xivState;
 	}
 
-	@HandleEvents(order = Integer.MIN_VALUE)
+	// Let position recovery capture the current actors before clearing them.
+	@HandleEvents(order = Integer.MIN_VALUE + 1)
 	public void clearCombatantsOnZoneChange(EventContext context, ZoneChangeEvent event) {
 		xivState.setCombatants(Collections.emptyList());
 	}

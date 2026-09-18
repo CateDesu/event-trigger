@@ -45,6 +45,45 @@ public class PullHistoryReaderTest {
     }
 
     @Test
+    public void skipsOnlyDamageThatCanAffectTheSelectedHistory() throws Exception {
+        String badChat = "00|invalid|0038|Player|Earlier chat|0";
+        Assert.assertEquals(read(badChat, ZONE, PLAYER, ANCHOR).skipped(), 0);
+        Assert.assertEquals(read(ZONE, PLAYER, badChat, WIPE, ANCHOR).skipped(), 0);
+        String badActor = "261|invalid|Change|40000003|Heading|1|0";
+        Assert.assertEquals(read(ZONE, PLAYER, OBJECT, badActor, WIPE, ANCHOR).skipped(), 1);
+        String confirmation = line(261, 4, "Change|40000003|Radius|2");
+        Assert.assertEquals(read(OBJECT, badActor, ZONE, PLAYER, confirmation, ANCHOR).skipped(), 1);
+        Assert.assertEquals(read(OBJECT, badActor, ZONE, PLAYER, ANCHOR).skipped(), 0);
+        Assert.assertEquals(read(ZONE, PLAYER, OBJECT, badActor,
+                line(261, 5, "Remove|40000003"), WIPE, ANCHOR).skipped(), 0);
+    }
+
+    @Test
+    public void currentActorSnapshotPreventsAnOldPositionSeed() throws Exception {
+        String current = line(3, 4, "40000003|Actor|00|64|0000|00||123|456|100|100|100|100|||120|80|2|0.4");
+        String change = line(261, 5, "Change|40000003|Radius|2");
+        var result = read(OBJECT, ZONE, PLAYER, current, change, ANCHOR);
+        Assert.assertEquals(result.lines(), List.of(ZONE, PLAYER, current, change));
+        result = read(OBJECT, ZONE, PLAYER, current, change, WIPE, ANCHOR);
+        Assert.assertFalse(result.lines().stream().anyMatch(s -> s.contains("|Add|40000003")));
+    }
+
+    @Test
+    public void networkPositionsReplaceOlderCachedPositions() throws Exception {
+        var result = read(OBJECT, line(271, 1, "40000003|0.4|0|0|120|80|2"), ZONE, PLAYER,
+                line(261, 4, "Change|40000003|Radius|2"), ANCHOR);
+        Assert.assertTrue(result.lines().stream().anyMatch(s -> s.contains("|PosX|120.0|PosY|80.0|PosZ|2.0|Heading|0.4|")));
+        Assert.assertFalse(result.lines().stream().anyMatch(s -> s.contains("|PosX|95|")));
+    }
+
+    @Test
+    public void omittedZeroCoordinatesArePresentInTheSeed() throws Exception {
+        var result = read(ZONE, PLAYER, line(261, 5, "Add|40000003|Type|7|PosY|25|Heading|1"), WIPE, ANCHOR);
+        Assert.assertTrue(result.lines().stream().anyMatch(s -> s.contains("|Add|40000003|")
+                && s.contains("|PosX|0|") && s.contains("|PosZ|0|")));
+    }
+
+    @Test
     public void restoresPreAnnouncementPositionOnlyWhenTheActorIsSeenAgain() throws Exception {
         String change = line(261, 4, "Change|40000003|Heading|1");
         var result = read(OBJECT, ZONE, PLAYER, change, ANCHOR);

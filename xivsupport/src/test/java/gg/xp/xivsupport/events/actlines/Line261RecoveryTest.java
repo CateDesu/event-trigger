@@ -67,6 +67,38 @@ public class Line261RecoveryTest {
     }
 
     @Test
+    public void newerNetworkPositionSurvivesTheImportZoneReset() throws Exception {
+        var engine = new Engine();
+        engine.dist.acceptEvent(new ACTLogLineEvent("271|2026-09-16T00:00:01Z|40000003|0.4|0|0|120|80|2|0"));
+        engine.zone();
+        engine.line("Change|40000003|Radius|2");
+        Assert.assertEquals(engine.state.getCombatant(ACTOR).getPos(), new Position(120, 80, 2, 0.4));
+    }
+
+    @Test
+    public void actorWithoutAFullSnapshotRetainsTheLatestPosition() throws Exception {
+        var engine = new Engine();
+        engine.line("Remove|40000003");
+        engine.line("Add|40000003|Type|2|PosX|95|PosY|25");
+        Assert.assertFalse(engine.state.getCombatants().containsKey(ACTOR));
+        engine.dist.acceptEvent(new ACTLogLineEvent("271|2026-09-16T00:00:01Z|40000003|0.4|0|0|120|80|2|0"));
+        engine.zone();
+        engine.line("Change|40000003|Radius|2");
+        Assert.assertEquals(engine.state.getCombatant(ACTOR).getPos(), new Position(120, 80, 2, 0.4));
+    }
+
+    @Test
+    public void addDefaultsOmittedCoordinatesWithoutInheritingOldValues() {
+        var engine = new Engine();
+        engine.line("Add|40000003|Type|7|PosY|25|PosZ|12.5|Heading|1");
+        Assert.assertEquals(engine.state.getCombatant(ACTOR).getPos(), new Position(0, 25, 12.5, 1));
+        engine.line("Add|40000003|Type|7|PosX|120");
+        Assert.assertEquals(engine.state.getCombatant(ACTOR).getPos(), new Position(120, 0, 0, 0));
+        engine.line("Add|40000003|Type|7");
+        Assert.assertEquals(engine.state.getCombatant(ACTOR).getPos(), new Position(0, 0, 0, 0));
+    }
+
+    @Test
     public void newAddStartsFreshPositionData() throws Exception {
         var engine = new Engine();
         engine.zone();

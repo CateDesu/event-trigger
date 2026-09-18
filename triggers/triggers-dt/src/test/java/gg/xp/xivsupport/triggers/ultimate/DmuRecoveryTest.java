@@ -21,6 +21,7 @@ import gg.xp.xivsupport.events.actlines.parsers.FakeACTTimeSource;
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerFailedEvent;
 import gg.xp.xivsupport.eventstorage.EventReader;
+import gg.xp.xivsupport.gui.imprt.ListEventIterator;
 import gg.xp.xivsupport.replay.ReplayController;
 import gg.xp.xivsupport.sys.KnownLogSource;
 import gg.xp.xivsupport.sys.PrimaryLogSource;
@@ -29,6 +30,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import java.util.List;
+import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class DmuRecoveryTest {
@@ -38,6 +40,10 @@ public class DmuRecoveryTest {
 	}
 
 	private List<String> replay(String resource, long player, boolean missingStackTargets) {
+		return replay(resource, player, missingStackTargets, false);
+	}
+
+	private List<String> replay(String resource, long player, boolean missingStackTargets, boolean sparseGraven) {
 		var pico = XivMain.testingMasterInit();
 		pico.addComponent(FakeACTTimeSource.class);
 		var clock = pico.getComponent(FakeACTTimeSource.class);
@@ -81,7 +87,30 @@ public class DmuRecoveryTest {
 			pico.getComponent(XivStateImpl.class).setPlayerTmpOverride(new XivEntity(player, "Player"));
 		}
 		var master = pico.getComponent(EventMaster.class);
-		var replay = new ReplayController(master, EventReader.readActLogResource(resource), false) {
+		var events = EventReader.readActLogResource(resource);
+		if (sparseGraven) {
+			var filtered = new ArrayList<ACTLogLineEvent>();
+			int tethers = 0;
+			boolean reachedMarker = false;
+			int removed = 0;
+			while (events.hasMore()) {
+				var line = events.getNext();
+				if (tethers == 4 && !reachedMarker) {
+					if (line.getLineNumber() != 27) {
+						removed++;
+						continue;
+					}
+					reachedMarker = true;
+				}
+				filtered.add(line);
+				if (line.getLineNumber() == 35 && line.getRawFields()[8].equals("002D")) {
+					tethers++;
+				}
+			}
+			Assert.assertEquals(removed, 145, "Remove only the gap before the first Graven marker");
+			events = new ListEventIterator<>(filtered);
+		}
+		var replay = new ReplayController(master, events, false) {
 			@Override
 			protected void preProcessEvent(Event event) {
 				if (resource.equals("/dmu-arrow-applications.log") && event instanceof ACTLogLineEvent line
@@ -126,6 +155,14 @@ public class DmuRecoveryTest {
 		Assert.assertTrue(calls.contains("Graven Image 1: Spread For Laser"), calls.toString());
 		Assert.assertTrue(calls.contains("Graven Image 1: Got Hit by Laser"), calls.toString());
 		Assert.assertTrue(calls.contains("Graven Image 2: Real Ice, Stone"), calls.toString());
+		Assert.assertTrue(calls.contains("Graven Image 2: Final Soaks"), calls.toString());
+	}
+
+	@Test
+	public void sparseGravenKeepsTheMarkerThatEndsTheTetherWindow() {
+		var calls = replay("/dmu-graven.log", 0, false, true);
+		Assert.assertTrue(calls.contains("Graven Image 1: Spread For Laser"), calls.toString());
+		Assert.assertTrue(calls.contains("Graven Image 1: Got Hit by Laser"), calls.toString());
 		Assert.assertTrue(calls.contains("Graven Image 2: Final Soaks"), calls.toString());
 	}
 

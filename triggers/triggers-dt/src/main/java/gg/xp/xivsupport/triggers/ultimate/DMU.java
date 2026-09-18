@@ -189,10 +189,27 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				s.updateCall(gravenImage, e1);
 				List<BuffApplied> confettis = buffs.findBuffsById(0x13D6);
 				// The tether set identifies the mechanic even when the first cast was missed.
-				List<TetherEvent> tethers = s.waitEventsQuickSuccession(8, TetherEvent.class,
-						te -> te.tetherIdMatches(45));
+				List<TetherEvent> tethers = new ArrayList<>();
+				List<HeadMarkerEvent> earlyMarkers = new ArrayList<>();
+				tethers.add(s.waitEvent(TetherEvent.class, te -> te.tetherIdMatches(45)));
+				while (tethers.size() < 8) {
+					BaseEvent next = s.waitEvent(BaseEvent.class);
+					if (next instanceof TetherEvent tether && tether.tetherIdMatches(45)) {
+						tethers.add(tether);
+					}
+					else {
+						// A sparse log can use the first marker to end the tether window.
+						if (next instanceof HeadMarkerEvent marker && marker.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE)) {
+							earlyMarkers.add(marker);
+							break;
+						}
+						if (tethers.get(tethers.size() - 1).getEffectiveTimeSince().toMillis() > 200) {
+							break;
+						}
+					}
+				}
 				if (tethers.size() == 4) {
-					gravenImageFirst(s, tethers);
+					gravenImageFirst(s, tethers, earlyMarkers);
 				}
 				else if (tethers.size() == 8) {
 					gravenImageSecond(s, tethers, confettis);
@@ -202,7 +219,8 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				}
 			});
 
-	private void gravenImageFirst(SequentialTriggerController<BaseEvent> s, List<TetherEvent> initialTethers) {
+	private void gravenImageFirst(SequentialTriggerController<BaseEvent> s, List<TetherEvent> initialTethers,
+	                              List<HeadMarkerEvent> earlyMarkers) {
 		Optional<TetherEvent> myTether = initialTethers.stream().filter(t -> t.eitherTargetMatches(XivCombatant::isThePlayer)).findAny();
 		if (myTether.isPresent()) {
 			s.updateCall(graven1Tether, myTether.get());
@@ -245,7 +263,8 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 		// stack is HM 128, spread is 127
 
 		{
-			List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE));
+			List<HeadMarkerEvent> kefkaHM = new ArrayList<>(earlyMarkers);
+			kefkaHM.addAll(s.waitEvents(2 - kefkaHM.size(), HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE)));
 			var playerHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(127, 128));
 			boolean fakeFire = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(673));
 			boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));

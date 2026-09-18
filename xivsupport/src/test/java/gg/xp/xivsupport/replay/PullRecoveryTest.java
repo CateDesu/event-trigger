@@ -8,6 +8,9 @@ import gg.xp.xivsupport.events.actlines.events.WipeEvent;
 import gg.xp.xivsupport.events.actlines.events.ChatLineEvent;
 import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
 import gg.xp.xivsupport.events.actlines.events.actorcontrol.DutyRecommenceEvent;
+import gg.xp.xivsupport.events.actlines.events.actorcontrol.FadeOutEvent;
+import gg.xp.xivsupport.events.actlines.events.actorcontrol.VictoryEvent;
+import gg.xp.xivsupport.events.misc.pulls.PullEndedEvent;
 import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
 import gg.xp.xivsupport.models.XivZone;
 import gg.xp.xivsupport.sys.PrimaryLogSource;
@@ -24,7 +27,8 @@ public class PullRecoveryTest {
     public void rejectedParserFieldsCountWithoutDiscardingLaterEvents() {
         var pico = XivMain.testingMasterInit();
         var dist = pico.getComponent(EventDistributor.class);
-        dist.acceptEvent(new InitEvent());
+        var master = pico.getComponent(EventMaster.class);
+        master.pushEventAndWait(new InitEvent());
         var clock = new RecoveryClock();
         var recovery = new PullRecovery(clock, new RecoveryQueue(clock), pico.getComponent(EventMaster.class),
                 pico.getComponent(PrimaryLogSource.class));
@@ -33,21 +37,22 @@ public class PullRecoveryTest {
         dist.registerHandler(ChatLineEvent.class, (c, e) -> echoes.add(e.getLine()));
         clock.begin(Instant.now());
         String malformed = "20|2026-09-16T00:00:00Z|40000001|Boss|NOT_HEX|Bad cast|10000001|Player|3|0|0|0|0|0";
-        dist.acceptEvent(new ACTLogLineEvent(malformed));
-        dist.acceptEvent(new ACTLogLineEvent("999|2026-09-16T00:00:00Z|Unsupported|0"));
-        dist.acceptEvent(new ACTLogLineEvent("00|2026-09-16T00:00:01Z|0038|Player|Later valid event|0"));
+        master.pushEventAndWait(new ACTLogLineEvent(malformed));
+        master.pushEventAndWait(new ACTLogLineEvent("999|2026-09-16T00:00:00Z|Unsupported|0"));
+        master.pushEventAndWait(new ACTLogLineEvent("00|2026-09-16T00:00:01Z|0038|Player|Later valid event|0"));
         Assert.assertEquals(recovery.skipped(), 1);
         Assert.assertEquals(echoes, List.of("Later valid event"));
         clock.resume();
-        dist.acceptEvent(new ACTLogLineEvent(malformed));
+        master.pushEventAndWait(new ACTLogLineEvent(malformed));
         Assert.assertEquals(recovery.skipped(), 1);
     }
 
     @Test
-    public void aNewPullInvalidatesPendingOutputPermits() {
+    public void pullBoundariesInvalidatePendingOutputPermits() {
         var clock = new RecoveryClock();
         var recovery = new PullRecovery(clock, new RecoveryQueue(clock), null, null);
         for (var boundary : List.of(new WipeEvent(), new PullStartedEvent(), new DutyRecommenceEvent(),
+                new FadeOutEvent(), new VictoryEvent(), new PullEndedEvent(),
                 new ZoneChangeEvent(new XivZone(0x553, "Raid")))) {
             var before = recovery.outputPermit();
             Assert.assertTrue(before.getAsBoolean());

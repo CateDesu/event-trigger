@@ -135,6 +135,26 @@ public class DmuRegressionTest {
 	}
 
 	@DataProvider
+	public Object[][] gravenMarkerDelays() { return new Object[][]{{0L}, {200L}, {2_000L}}; }
+
+	@Test(dataProvider = "gravenMarkerDelays")
+	public void firstGravenKeepsAnEarlyMarker(long delay) throws Exception {
+		try (Harness h = new Harness()) {
+			h.select("gravenImageSq");
+			h.cast(0xBCF2);
+			for (int i = 0; i < 4; i++) {
+				h.feed(new TetherEvent(npc(99, null), player(i), 45));
+			}
+			h.clock.updateAndGet(time -> time.plusMillis(delay));
+			h.feed(new HeadMarkerEvent(BOSS, 675));
+			h.feed(new HeadMarkerEvent(BOSS, 673));
+			h.feed(new HeadMarkerEvent(player(0), 128));
+			h.tick(6_001);
+			Assert.assertTrue(h.context.calls().contains("Graven Image 1: Spread For Laser"), h.context.calls().toString());
+		}
+	}
+
+	@DataProvider
 	public Object[][] arrows() {
 		return new Object[][]{{false, false, false}, {true, false, false}, {true, true, false},
 				{true, false, true}, {true, true, true}};

@@ -9,8 +9,11 @@ import gg.xp.xivsupport.events.ACTLogLineEvent;
 import gg.xp.xivsupport.events.actlines.events.WipeEvent;
 import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
 import gg.xp.xivsupport.events.actlines.events.actorcontrol.DutyCommenceEvent;
+import gg.xp.xivsupport.events.actlines.events.actorcontrol.FadeOutEvent;
+import gg.xp.xivsupport.events.actlines.events.actorcontrol.VictoryEvent;
 import gg.xp.xivsupport.events.actlines.parsers.ActLineParseFailureEvent;
 import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
+import gg.xp.xivsupport.events.misc.pulls.PullEndedEvent;
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
 import gg.xp.xivsupport.events.ws.ActWsRawMsg;
 import gg.xp.xivsupport.sys.KnownLogSource;
@@ -173,6 +176,7 @@ public final class PullRecovery implements EventHandler<Event> {
             recordFailure();
         }
         if (event instanceof ZoneChangeEvent || event instanceof WipeEvent
+                || event instanceof FadeOutEvent || event instanceof VictoryEvent || event instanceof PullEndedEvent
                 || event instanceof DutyCommenceEvent || event instanceof PullStartedEvent) {
             cancelPendingOutput();
         }

@@ -4,6 +4,7 @@ import gg.xp.reevent.events.Event;
 import gg.xp.reevent.events.EventContext;
 import gg.xp.reevent.scan.HandleEvents;
 import gg.xp.xivsupport.events.actlines.events.RawRemoveCombatantEvent;
+import gg.xp.xivsupport.events.actlines.events.RawAddCombatantEvent;
 import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
 import gg.xp.xivsupport.events.state.XivState;
 import gg.xp.xivsupport.models.Position;
@@ -16,8 +17,10 @@ import org.slf4j.LoggerFactory;
 import java.time.ZonedDateTime;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @SuppressWarnings("unused")
 public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
@@ -26,7 +29,7 @@ public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
 	private final XivState state;
 	private final PrimaryLogSource source;
 	private record ActorPosition(Position position, boolean noncombatant) {}
-	private Map<Long, ActorPosition> positions = new HashMap<>();
+	private final Set<Long> positionedActors = new HashSet<>();
 	private Map<Long, ActorPosition> beforeZone = new HashMap<>();
 
 	public Line261Parser(PicoContainer container, XivState state) {
@@ -35,10 +38,27 @@ public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
 		this.source = container.getComponent(PrimaryLogSource.class);
 	}
 
-	@HandleEvents
+	@HandleEvents(order = Integer.MIN_VALUE)
 	public void zoneChange(EventContext context, ZoneChangeEvent event) {
-		beforeZone = source.isActImport() ? positions : new HashMap<>();
-		positions = new HashMap<>();
+		beforeZone = new HashMap<>();
+		if (source.isActImport()) {
+			// Capture every position source before ActStateReader clears imported actors.
+			positionedActors.addAll(state.getCombatants().keySet());
+			for (long id : positionedActors) {
+				XivCombatant actor = state.getCombatant(id);
+				if (actor != null && actor.getPos() != null) {
+					beforeZone.put(actor.getId(), new ActorPosition(actor.getPos(), actor.getRawType() == 7));
+				}
+			}
+		}
+		positionedActors.clear();
+	}
+
+	@HandleEvents
+	public void combatantAdded(EventContext context, RawAddCombatantEvent event) {
+		if (event.getFullInfo() != null) {
+			forget(event.getEntity().getId());
+		}
 	}
 
 	@HandleEvents
@@ -47,7 +67,7 @@ public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
 	}
 
 	private void forget(long id) {
-		positions.remove(id);
+		positionedActors.remove(id);
 		beforeZone.remove(id);
 	}
 
@@ -106,7 +126,7 @@ public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
 						case "BNpcNameID" -> state.provideNpcNameId(existing, Long.parseLong(valueRaw, 16));
 					}
 				}
-				if (pos.isEmpty() && prior == null) {
+				if (!added && pos.isEmpty() && prior == null) {
 					break;
 				}
 				// Workaround for type-7 (non-combatants) not appearing in ACT 03-lines, thus no raw data existing
@@ -115,7 +135,8 @@ public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
 				if (noncombatant) {
 					state.provideTypeOverride(existing, 7);
 				}
-				if (existingPos == null && !(pos.containsKey(PosKeys.PosX) && pos.containsKey(PosKeys.PosY))) {
+				// Add records omit fields whose value is zero.
+				if (!added && existingPos == null && !(pos.containsKey(PosKeys.PosX) && pos.containsKey(PosKeys.PosY))) {
 					log.trace("Incomplete position info for 0x{}", Long.toString(existing.getId(), 16));
 					return null;
 				}
@@ -127,7 +148,7 @@ public class Line261Parser extends AbstractACTLineParser<Line261Parser.Fields> {
 				state.provideCombatantPos(existing, updated, true);
 				beforeZone.remove(existing.getId());
 				if (source.isActImport()) {
-					positions.put(existing.getId(), new ActorPosition(updated, noncombatant));
+					positionedActors.add(existing.getId());
 				}
 			}
 		}

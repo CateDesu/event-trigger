@@ -95,6 +95,8 @@ public final class PullHistoryReader {
         private long bytes;
         private boolean collecting;
         private int skipped;
+        private Map<String, Integer> stateErrors = new LinkedHashMap<>();
+        private Map<String, Integer> beforeZoneErrors = Map.of();
         private final long maxHistoryBytes;
         private final List<String> history = new ArrayList<>();
         private final Map<String, String> combatants = new LinkedHashMap<>();
@@ -111,6 +113,50 @@ public final class PullHistoryReader {
             return Long.toHexString(Long.parseUnsignedLong(id, 16)).toUpperCase();
         }
 
+        private void forgetBeforeZone(String id) {
+            if (!beforeZone.isEmpty()) {
+                beforeZone.remove(id);
+            }
+            if (!beforeZoneErrors.isEmpty()) {
+                beforeZoneErrors.remove(id);
+            }
+        }
+
+        private void recordStateError(String[] parts) {
+            try {
+                String id = switch (Integer.parseInt(parts[0])) {
+                    case 3, 4, 271 -> actor(parts[2]);
+                    case 261 -> actor(parts[3]);
+                    default -> null;
+                };
+                if (id != null) {
+                    stateErrors.merge(id, 1, Integer::sum);
+                }
+            }
+            catch (NumberFormatException | IndexOutOfBoundsException ignored) {
+                // Without an actor ID this line cannot contribute an actor seed.
+            }
+        }
+
+        private Map<String, String> positionValues(String id) {
+            Map<String, String> values = positions.get(id);
+            if (values != null) {
+                return values;
+            }
+            Map<String, String> prior = beforeZone.get(id);
+            if (prior == null) {
+                return new LinkedHashMap<>();
+            }
+            // An update confirms that this actor survived the announcement.
+            seedPositions.put(id, new LinkedHashMap<>(prior));
+            int errors = beforeZoneErrors.getOrDefault(id, 0);
+            skipped += errors;
+            if (errors > 0) {
+                stateErrors.merge(id, errors, Integer::sum);
+            }
+            return new LinkedHashMap<>(prior);
+        }
+
         void accept(String line) {
             String[] parts = line.split("\\|", -1);
             try {
@@ -121,18 +167,24 @@ public final class PullHistoryReader {
                         zone = Long.parseLong(parts[2], 16);
                         beforeZone = positions;
                         positions = new LinkedHashMap<>();
+                        beforeZoneErrors = stateErrors;
+                        stateErrors = new LinkedHashMap<>();
                         combatants.clear();
                         boundary();
                         collecting = true;
                     }
-                    case 3 -> combatants.put(actor(parts[2]), line);
+                    case 3 -> {
+                        String id = actor(parts[2]);
+                        combatants.put(id, line);
+                        // A current actor snapshot supersedes an unconfirmed position from the old zone.
+                        forgetBeforeZone(id);
+                    }
                     case 4 -> {
                         String id = actor(parts[2]);
                         combatants.remove(id);
                         positions.remove(id);
-                        if (!beforeZone.isEmpty()) {
-                            beforeZone.remove(id);
-                        }
+                        stateErrors.remove(id);
+                        forgetBeforeZone(id);
                     }
                     case 261 -> {
                         String id = actor(parts[3]);
@@ -140,33 +192,43 @@ public final class PullHistoryReader {
                             case "Remove" -> {
                                 positions.remove(id);
                                 combatants.remove(id);
-                                if (!beforeZone.isEmpty()) {
-                                    beforeZone.remove(id);
-                                }
+                                stateErrors.remove(id);
+                                forgetBeforeZone(id);
                             }
                             case "Add", "Change" -> {
-                                Map<String, String> values = positions.get(id);
+                                Map<String, String> values;
                                 if ("Add".equals(parts[2])) {
                                     values = new LinkedHashMap<>();
+                                    stateErrors.remove(id);
                                 }
-                                else if (values == null) {
-                                    Map<String, String> prior = beforeZone.get(id);
-                                    values = prior == null ? new LinkedHashMap<>() : new LinkedHashMap<>(prior);
-                                    // A partial update confirms that this actor survived the announcement.
-                                    if (prior != null) {
-                                        seedPositions.put(id, new LinkedHashMap<>(prior));
-                                    }
+                                else {
+                                    values = positionValues(id);
                                 }
                                 for (int i = 4; i + 1 < parts.length - 1; i += 2) {
                                     values.put(parts[i], parts[i + 1]);
                                 }
-                                positions.put(id, values);
-                                if (!beforeZone.isEmpty()) {
-                                    beforeZone.remove(id);
+                                if ("Add".equals(parts[2])) {
+                                    for (String key : List.of("PosX", "PosY", "PosZ", "Heading")) {
+                                        values.putIfAbsent(key, "0");
+                                    }
                                 }
+                                positions.put(id, values);
+                                forgetBeforeZone(id);
                             }
                             default -> { }
                         }
+                    }
+                    case 271 -> {
+                        String id = actor(parts[2]);
+                        Map<String, String> update = Map.of(
+                                "PosX", Double.toString(Double.parseDouble(parts[6])),
+                                "PosY", Double.toString(Double.parseDouble(parts[7])),
+                                "PosZ", Double.toString(Double.parseDouble(parts[8])),
+                                "Heading", Double.toString(Double.parseDouble(parts[3])));
+                        var values = positionValues(id);
+                        values.putAll(update);
+                        positions.put(id, values);
+                        forgetBeforeZone(id);
                     }
                     case 33 -> {
                         long command = Long.parseLong(parts[3], 16);
@@ -190,11 +252,16 @@ public final class PullHistoryReader {
             }
             catch (NumberFormatException | IndexOutOfBoundsException | DateTimeException ignored) {
                 skipped++;
+                recordStateError(parts);
                 // An incomplete log line cannot establish a recovery boundary.
             }
         }
 
         private void boundary() {
+            // Earlier mechanics are discarded but damaged actor seeds can still affect this pull.
+            skipped = stateErrors.entrySet().stream()
+                    .filter(entry -> combatants.containsKey(entry.getKey()) || positions.containsKey(entry.getKey()))
+                    .mapToInt(Map.Entry::getValue).sum();
             history.clear();
             bytes = 0;
             seedCombatants.clear();
@@ -217,7 +284,8 @@ public final class PullHistoryReader {
                 lines.add(parts[0] + '|' + timestamp + '|' + parts[2]);
             }
             seedPositions.forEach((id, values) -> {
-                StringBuilder line = new StringBuilder("261|").append(timestamp).append("|Add|").append(id);
+                String update = values.keySet().containsAll(List.of("PosX", "PosY", "PosZ", "Heading")) ? "Add" : "Change";
+                StringBuilder line = new StringBuilder("261|").append(timestamp).append('|').append(update).append('|').append(id);
                 values.forEach((key, value) -> line.append('|').append(key).append('|').append(value));
                 lines.add(line.append("|0").toString());
             });
