@@ -834,14 +834,16 @@ public class FRU extends AutoChildEventHandler implements FilteredEventHandler {
 				log.info("ultimateRelativityTetherSq: start");
 				List<TetherEvent> tethers = s.waitEventsQuickSuccession(3, TetherEvent.class, te -> te.tetherIdMatches(0x86));
 				log.info("ultimateRelativityTetherSq: got tethers");
+				var hourglasses = tethers.stream()
+						.map(te -> te.getTargetMatching(cbt -> cbt.npcIdMatches(17832)))
+						.filter(Objects::nonNull).distinct().toList();
+				if (hourglasses.size() != 3) {
+					log.warn("Ultimate Relativity needs three distinct hourglasses to determine north");
+					return;
+				}
 				s.waitThenRefreshCombatants(100);
-				List<ArenaSector> sectors = tethers.stream().map(te -> {
-					XivCombatant target = te.getTargetMatching(cbt -> cbt.npcIdMatches(17832));
-					if (target == null) {
-						throw new IllegalStateException("Bad tether: %s".formatted(te));
-					}
-					return arenaPosNarrow.forCombatant(state.getLatestCombatantData(target));
-				}).toList();
+				List<ArenaSector> sectors = hourglasses.stream()
+						.map(target -> arenaPosNarrow.forCombatant(state.getLatestCombatantData(target))).toList();
 				log.info("ultimateRelativityTetherSq: sectors {}", sectors);
 				ArenaSector fakeNorth = null;
 				outer:
@@ -1809,6 +1811,5 @@ public class FRU extends AutoChildEventHandler implements FilteredEventHandler {
 	private final ModifiableCallout<AbilityCastStart> p5enrage = ModifiableCallout.durationBasedCall("P5 Enrage", "Enrage");
 
 }
-
 
 

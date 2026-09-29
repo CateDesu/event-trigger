@@ -176,15 +176,31 @@ public class M1S extends AutoChildEventHandler implements FilteredEventHandler {
 			AbilityCastStart.class, acs -> acs.abilityIdMatches(0x9441),
 			(e1, s) -> {
 				log.info("mouser start");
-				// first invocation:
-				// just call out whether it's on supports or dps
-				// Call out each kick
+				AbilityCastStart previousCast = null;
 				for (int i = 0; i < 4; i++) {
 					log.info("mouser {}", i);
-//					var hm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.getMarkerOffset() == 320);
-					var hm = s.waitEvent(HeadMarkerEvent.class, hme -> true);
+					HeadMarkerEvent hm = null;
+					AbilityCastStart cast;
+					while (true) {
+						var next = s.waitEvent(BaseEvent.class, event -> event instanceof HeadMarkerEvent marker && marker.getTarget().isPc()
+								|| event instanceof AbilityCastStart acs && acs.abilityIdMatches(0x9446, 0x9448));
+						if (next instanceof HeadMarkerEvent marker) {
+							// A late marker during the previous cast belongs to that hit.
+							if (previousCast == null || !marker.getEffectiveHappenedAt().isBefore(
+									previousCast.getEffectiveHappenedAt().plus(previousCast.getInitialDuration()))) {
+								hm = marker;
+							}
+						}
+						else {
+							cast = (AbilityCastStart) next;
+							break;
+						}
+					}
+					previousCast = cast;
+					if (hm == null || hm.getEffectiveHappenedAt().isAfter(cast.getEffectiveHappenedAt())) {
+						continue;
+					}
 					s.setParam("hm", hm);
-					var cast = s.waitEvent(AbilityCastStart.class, acs -> acs.abilityIdMatches(0x9446, 0x9448));
 					if (cast.abilityIdMatches(0x9446)) {
 						s.updateCall(kick, cast);
 					}

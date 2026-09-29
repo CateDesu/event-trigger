@@ -6,10 +6,11 @@ import gg.xp.reevent.events.EventDistributor;
 import gg.xp.reevent.events.EventHandler;
 import gg.xp.reevent.events.EventMaster;
 import gg.xp.reevent.events.InitEvent;
-import gg.xp.xivdata.data.*;
+import gg.xp.xivdata.data.Job;
 import gg.xp.xivsupport.callouts.ModifiedCalloutHandle;
 import gg.xp.xivsupport.callouts.ModifiedCalloutRepository;
 import gg.xp.xivsupport.callouts.RawModifiedCallout;
+import gg.xp.xivsupport.events.ACTLogLineEvent;
 import gg.xp.xivsupport.events.actlines.events.XivStateRecalculatedEvent;
 import gg.xp.xivsupport.events.actlines.parsers.FakeACTTimeSource;
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
@@ -21,6 +22,7 @@ import gg.xp.xivsupport.events.triggers.marks.ClearAutoMarkRequest;
 import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
 import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkRequest;
 import gg.xp.xivsupport.eventstorage.EventReader;
+import gg.xp.xivsupport.gui.imprt.EventIterator;
 import gg.xp.xivsupport.gui.overlay.FlyingTextOverlay;
 import gg.xp.xivsupport.models.XivPlayerCharacter;
 import gg.xp.xivsupport.replay.ReplayController;
@@ -86,13 +88,28 @@ public abstract class CalloutVerificationTest {
 	protected void configure(MutablePicoContainer pico) {
 	}
 
+	protected EventIterator<ACTLogLineEvent> getEvents() {
+		return EventReader.readActLogResource(getFileName());
+	}
+
+	protected FakeACTTimeSource createTimeSource() {
+		return new FakeACTTimeSource();
+	}
+
+	protected void verifyReplay(MutablePicoContainer pico, List<CalloutInitialValues> calls) {
+	}
+
+	protected Instant getCalloutTimeOrigin(MutablePicoContainer pico) {
+		var pull = pico.getComponent(PullTracker.class).getCurrentPull();
+		return pull == null || pull.getCombatStart() == null ? null : pull.getCombatStart().getHappenedAt();
+	}
+
 	@Test
 	void doTheTest() {
 		MutablePicoContainer pico = XivMain.testingMasterInit();
-		String fileName = getFileName();
-		ReplayController replayController = new ReplayController(pico.getComponent(EventMaster.class), EventReader.readActLogResource(fileName), false);
+		ReplayController replayController = new ReplayController(pico.getComponent(EventMaster.class), getEvents(), false);
 		pico.addComponent(replayController);
-		pico.addComponent(FakeACTTimeSource.class);
+		pico.addComponent(FakeACTTimeSource.class, createTimeSource());
 		FakeACTTimeSource timeSource = pico.getComponent(FakeACTTimeSource.class);
 
 		pico.getComponent(PrimaryLogSource.class).setLogSource(KnownLogSource.ACT_LOG_FILE);
@@ -158,22 +175,11 @@ public abstract class CalloutVerificationTest {
 			if (StringUtils.isEmpty(e.getCallText()) && StringUtils.isBlank(e.getVisualText())) {
 				return;
 			}
-			PullTracker pulls = pico.getComponent(PullTracker.class);
-			final long msDelta;
-			Pull currentPull = pulls.getCurrentPull();
-			if (currentPull == null) {
+			Instant origin = getCalloutTimeOrigin(pico);
+			if (origin == null) {
 				return;
 			}
-			else {
-				Event combatStart = currentPull.getCombatStart();
-				if (combatStart == null) {
-					return;
-				}
-				else {
-					Instant happenedAt = timeSource.now();
-					msDelta = Duration.between(combatStart.getHappenedAt(), happenedAt).toMillis();
-				}
-			}
+			long msDelta = Duration.between(origin, timeSource.now()).toMillis();
 			Event parent = e.getParent();
 			if (parent instanceof RawModifiedCallout<?>) {
 				parent = parent.getParent();
@@ -262,6 +268,7 @@ public abstract class CalloutVerificationTest {
 		replayController.advanceBy(Integer.MAX_VALUE);
 
 		pico.getComponent(EventMaster.class).getQueue().waitDrain();
+		verifyReplay(pico, actualCalls);
 
 
 		List<CalloutInitialValues> expectedCalls = getExpectedCalls();
