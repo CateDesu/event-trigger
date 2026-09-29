@@ -28,6 +28,7 @@ public class SequentialBurstTest {
         final FakeTimeSource clock = new FakeTimeSource();
         final BasicEventDistributor distributor = new BasicEventDistributor(NoOpStateStore.INSTANCE);
         final List<String> output = new ArrayList<>();
+        final List<SequentialTriggerFailedEvent> failures = new ArrayList<>();
         final SequentialTrigger<BaseEvent> trigger;
 
         Fixture(BiConsumer<Signal, SequentialTriggerController<BaseEvent>> body) {
@@ -35,6 +36,7 @@ public class SequentialBurstTest {
             trigger = SqtTemplates.sq(10_000, Signal.class, e -> e.name.equals("start"), body);
             distributor.registerHandler(BaseEvent.class, trigger::feed);
             distributor.registerHandler(DebugCommand.class, (ctx, e) -> output.add(e.getCommand()));
+            distributor.registerHandler(SequentialTriggerFailedEvent.class, (ctx, e) -> failures.add(e));
         }
 
         void send(String name, long millis) {
@@ -74,6 +76,39 @@ public class SequentialBurstTest {
             Assert.assertEquals(f.output, List.of("hits=1", "first"));
             f.send("marker", 300);
             Assert.assertEquals(f.output, List.of("hits=1", "first", "second"));
+        }
+    }
+
+    @Test
+    public void boundaryPredicateFailureIdentifiesItsWait() {
+        try (var f = new Fixture((start, s) -> {
+            burst(s, 2);
+            s.waitEvent(Signal.class, e -> {
+                throw new IllegalArgumentException("predicate failure");
+            });
+        })) {
+            f.send("start", 0);
+            f.send("hit", 10);
+            f.send("marker", 250);
+            Assert.assertEquals(f.failures.size(), 1);
+            Assert.assertEquals(f.failures.get(0).getPendingWait(), "Signal");
+            Assert.assertTrue(f.failures.get(0).getError() instanceof IllegalArgumentException);
+        }
+    }
+
+    @Test
+    public void successfulBoundaryClearsWaitBeforeLaterFailure() {
+        try (var f = new Fixture((start, s) -> {
+            burst(s, 2);
+            s.waitEvent(Signal.class, e -> e.name.equals("marker"));
+            throw new IllegalStateException("after wait");
+        })) {
+            f.send("start", 0);
+            f.send("hit", 10);
+            f.send("marker", 250);
+            Assert.assertEquals(f.failures.size(), 1);
+            Assert.assertNull(f.failures.get(0).getPendingWait());
+            Assert.assertTrue(f.failures.get(0).getError() instanceof IllegalStateException);
         }
     }
 

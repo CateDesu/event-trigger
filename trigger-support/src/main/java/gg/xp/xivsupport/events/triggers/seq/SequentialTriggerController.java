@@ -718,16 +718,17 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	// To be called from internal thread
 	private X waitEvent(Predicate<X> filter, String description) {
 		synchronized (lock) {
+			pendingWait = description;
 			X pending = nextWaitEvent;
 			nextWaitEvent = null;
 			if (pending != null && !die && !cycleProcessingTimeExceeded && filter.test(pending)) {
+				pendingWait = null;
 				return pending;
 			}
 			processing = false;
 			currentEvent = null;
 			context = null;
 			this.filter = filter;
-			pendingWait = description;
 			lock.notifyAll();
 			while (true) {
 				if (die) {

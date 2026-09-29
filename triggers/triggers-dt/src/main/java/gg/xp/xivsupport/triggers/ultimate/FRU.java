@@ -47,6 +47,7 @@ import java.io.Serial;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -832,7 +833,14 @@ public class FRU extends AutoChildEventHandler implements FilteredEventHandler {
 			(e1, s) -> {
 				// It *seems* like the "north" is always the first tether, but this relies on less assumptions.
 				log.info("ultimateRelativityTetherSq: start");
-				List<TetherEvent> tethers = s.waitEventsQuickSuccession(3, TetherEvent.class, te -> te.tetherIdMatches(0x86));
+				var seenHourglasses = new HashSet<Long>();
+				List<TetherEvent> tethers = s.waitEventsQuickSuccession(3, TetherEvent.class, te -> {
+					if (!te.tetherIdMatches(0x86)) {
+						return false;
+					}
+					var hourglass = te.getTargetMatching(cbt -> cbt.npcIdMatches(17832));
+					return hourglass != null && seenHourglasses.add(hourglass.getId());
+				});
 				log.info("ultimateRelativityTetherSq: got tethers");
 				var hourglasses = tethers.stream()
 						.map(te -> te.getTargetMatching(cbt -> cbt.npcIdMatches(17832)))
@@ -1811,5 +1819,4 @@ public class FRU extends AutoChildEventHandler implements FilteredEventHandler {
 	private final ModifiableCallout<AbilityCastStart> p5enrage = ModifiableCallout.durationBasedCall("P5 Enrage", "Enrage");
 
 }
-
 

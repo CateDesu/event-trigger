@@ -24,6 +24,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Predicate;
 
 @CalloutRepo(name = "M1S", duty = KnownDuty.M1S)
@@ -177,6 +179,7 @@ public class M1S extends AutoChildEventHandler implements FilteredEventHandler {
 			(e1, s) -> {
 				log.info("mouser start");
 				AbilityCastStart previousCast = null;
+				List<AbilityCastStart> seenCasts = new ArrayList<>();
 				for (int i = 0; i < 4; i++) {
 					log.info("mouser {}", i);
 					HeadMarkerEvent hm = null;
@@ -192,7 +195,14 @@ public class M1S extends AutoChildEventHandler implements FilteredEventHandler {
 							}
 						}
 						else {
-							cast = (AbilityCastStart) next;
+							var candidate = (AbilityCastStart) next;
+							if (seenCasts.stream().anyMatch(seen -> seen.getSource().equals(candidate.getSource())
+									&& seen.getAbility().getId() == candidate.getAbility().getId()
+									&& seen.getHappenedAt().equals(candidate.getHappenedAt()))) {
+								continue;
+							}
+							seenCasts.add(candidate);
+							cast = candidate;
 							break;
 						}
 					}
