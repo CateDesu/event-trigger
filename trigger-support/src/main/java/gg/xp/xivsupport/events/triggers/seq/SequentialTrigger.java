@@ -52,6 +52,9 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 		}
 		switch (concurrency) {
 			case BLOCK_NEW -> {
+				if (instance != null && instance.isDone()) {
+					instance = null;
+				}
 				if (instance == null) {
 					if (startOn.test(event)) {
 						instance = new SequentialTriggerController<>(ctx, event, trigger, timeoutMs, handlerName);
@@ -59,9 +62,9 @@ public class SequentialTrigger<X extends BaseEvent> implements TypedEventHandler
 				}
 				else {
 					instance.provideEvent(ctx, event);
-					if (instance.isDone()) {
-						instance = null;
-					}
+				}
+				if (instance != null && instance.isDone()) {
+					instance = null;
 				}
 			}
 			case REPLACE_OLD -> {

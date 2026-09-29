@@ -56,6 +56,7 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	private final X initialEvent;
 	private final int timeout;
 	private volatile X currentEvent;
+	private @Nullable X nextWaitEvent;
 	private volatile EventContext context;
 	private volatile boolean done;
 	private volatile boolean processing = true;
@@ -516,28 +517,32 @@ public class SequentialTriggerController<X extends BaseEvent> {
 		return waitEventsQuickSuccession(limit, eventClass, eventFilter, Duration.ofMillis(200));
 	}
 
+	/** The event ending a burst is offered to the next wait only, and discarded if it does not match. */
 	public <Y extends BaseEvent> List<Y> waitEventsQuickSuccession(int limit, Class<Y> eventClass, Predicate<Y> eventFilter, Duration maxDelta) {
 		List<Y> out = new ArrayList<>();
+		if (limit <= 0) {
+			return out;
+		}
 		Y last = waitEvent(eventClass, eventFilter);
 		out.add(last);
-		while (true) {
+		while (out.size() < limit) {
 			X event = waitEvent(e -> true, eventClass.getSimpleName() + " in quick succession");
-			// First possibility - event we're interested int
-			if (eventClass.isInstance(event) && eventFilter.test((Y) event)) {
-				out.add((Y) event);
-				last = (Y) event;
-				// If we have reached the limit, return it now
-				if (out.size() >= limit) {
-					return out;
-				}
-			}
-			// Second possibility - hit our stop trigger
-			else if (last.getEffectiveTimeSince().compareTo(maxDelta) > 0) {
-				log.info("Sequential trigger stopping on {}", event);
+			boolean matches = eventClass.isInstance(event) && eventFilter.test((Y) event);
+			// Unrelated events can use a different clock during replay.
+			Duration gap = matches
+					? Duration.between(last.getEffectiveHappenedAt(), event.getEffectiveHappenedAt())
+					: last.getEffectiveTimeSince();
+			if (gap.compareTo(maxDelta) > 0) {
+				// The next wait may need the event that closed this burst.
+				nextWaitEvent = event;
 				return out;
 			}
-			// Third possibility - keep looking
+			if (matches) {
+				out.add((Y) event);
+				last = (Y) event;
+			}
 		}
+		return out;
 	}
 
 	public void waitBuffRemoved(StatusEffectRepository repo, BuffApplied buff) {
@@ -713,6 +718,11 @@ public class SequentialTriggerController<X extends BaseEvent> {
 	// To be called from internal thread
 	private X waitEvent(Predicate<X> filter, String description) {
 		synchronized (lock) {
+			X pending = nextWaitEvent;
+			nextWaitEvent = null;
+			if (pending != null && !die && !cycleProcessingTimeExceeded && filter.test(pending)) {
+				return pending;
+			}
 			processing = false;
 			currentEvent = null;
 			context = null;

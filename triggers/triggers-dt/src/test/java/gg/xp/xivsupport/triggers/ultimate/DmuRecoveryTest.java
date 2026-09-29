@@ -44,6 +44,10 @@ public class DmuRecoveryTest {
 	}
 
 	private List<String> replay(String resource, long player, boolean missingStackTargets, boolean sparseGraven) {
+		return replay(resource, player, missingStackTargets, sparseGraven, false);
+	}
+
+	private List<String> replay(String resource, long player, boolean missingStackTargets, boolean sparseGraven, boolean missingPlayerTether) {
 		var pico = XivMain.testingMasterInit();
 		pico.addComponent(FakeACTTimeSource.class);
 		var clock = pico.getComponent(FakeACTTimeSource.class);
@@ -88,6 +92,22 @@ public class DmuRecoveryTest {
 		}
 		var master = pico.getComponent(EventMaster.class);
 		var events = EventReader.readActLogResource(resource);
+		if (missingPlayerTether) {
+			var filtered = new ArrayList<ACTLogLineEvent>();
+			int removed = 0;
+			while (events.hasMore()) {
+				var line = events.getNext();
+				if (line.getLineNumber() == 35 && line.getRawFields()[4].equals("10031A09")
+						&& line.getRawFields()[8].equals("002D")) {
+					removed++;
+				}
+				else {
+					filtered.add(line);
+				}
+			}
+			Assert.assertEquals(removed, 1, "Remove only the player's tether");
+			events = new ListEventIterator<>(filtered);
+		}
 		if (sparseGraven) {
 			var filtered = new ArrayList<ACTLogLineEvent>();
 			int tethers = 0;
@@ -179,6 +199,16 @@ public class DmuRecoveryTest {
 		Assert.assertTrue(calls.contains("TT: Fake Gaze (Early Call)"), calls.toString());
 		Assert.assertFalse(calls.contains("TT: Real Gaze (Early Call)"), calls.toString());
 		Assert.assertTrue(calls.contains("TT: Element Mechanics"), calls.toString());
+	}
+
+	@Test
+	public void missingPlayerTetherPreservesGazeAndElements() {
+		var calls = replay("/dmu-arrows.log", 0, false, false, true);
+		Assert.assertTrue(calls.contains("TT: Double E"), calls.toString());
+		Assert.assertTrue(calls.contains("TT: Fake Gaze (Early Call)"), calls.toString());
+		Assert.assertTrue(calls.contains("TT: Element Mechanics"), calls.toString());
+		Assert.assertFalse(calls.stream().anyMatch(call -> call.startsWith("TT:")
+				&& call.contains("Tether")), calls.toString());
 	}
 
 	@Test
