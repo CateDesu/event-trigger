@@ -25,13 +25,8 @@ public class PlayerMarkerRepository {
 	public void markerPlaced(EventContext context, PlayerMarkerPlacedEvent event) {
 		XivCombatant target = event.getTarget();
 		log.info("Marker {} PLACED ON {} (by {})", event.getMarker().getFriendlyName(), target.getName(), event.getSource().getName());
+		markers.entrySet().removeIf(entry -> target.equals(entry.getValue()));
 		markers.put(event.getMarker(), target);
-		// This situation *should* be a non-issue, since there's a remove line for when a marker is implicitly removed
-		// by putting another marker on the same unit, but check just in case.
-		MarkerSign otherSign = signOnCombatant(target);
-		if (otherSign != null) {
-			markers.remove(otherSign, target);
-		}
 	}
 
 	@HandleEvents(order = -1_000_000)

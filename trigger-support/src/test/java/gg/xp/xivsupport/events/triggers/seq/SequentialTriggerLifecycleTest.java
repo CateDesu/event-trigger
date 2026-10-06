@@ -4,6 +4,8 @@ import gg.xp.reevent.context.StateStore;
 import gg.xp.reevent.events.BaseEvent;
 import gg.xp.reevent.events.Event;
 import gg.xp.reevent.events.EventContext;
+import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
+import gg.xp.xivsupport.models.XivZone;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -15,6 +17,28 @@ public class SequentialTriggerLifecycleTest {
 
 	private static class Start extends BaseEvent {}
 	private static class Finish extends BaseEvent {}
+
+	@Test
+	public void zoneChangeCancelsAPendingClearAndAllowsTheNextSequence() {
+		Context context = new Context();
+		SequentialTrigger<BaseEvent> trigger = SqtTemplates.sq(5_000, Start.class, e -> true,
+				(e, s) -> {
+					s.waitEvent(Finish.class);
+					s.accept(new Finish());
+				});
+		try {
+			trigger.feed(context, new Start());
+			trigger.feed(context, new ZoneChangeEvent(new XivZone(999, "Other zone")));
+			trigger.feed(context, new Finish());
+			Assert.assertTrue(context.events.isEmpty(), "Old clear must be cancelled on zone change");
+			trigger.feed(context, new Start());
+			trigger.feed(context, new Finish());
+			Assert.assertEquals(context.events.size(), 1);
+		}
+		finally {
+			trigger.stopSilently();
+		}
+	}
 
 	private static class Context implements EventContext {
 		private final List<Event> events = new ArrayList<>();

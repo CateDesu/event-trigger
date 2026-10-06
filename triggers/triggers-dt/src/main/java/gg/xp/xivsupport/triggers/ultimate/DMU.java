@@ -1,6 +1,7 @@
 package gg.xp.xivsupport.triggers.ultimate;
 
 import gg.xp.reevent.events.BaseEvent;
+import gg.xp.reevent.events.Event;
 import gg.xp.reevent.events.EventContext;
 import gg.xp.reevent.scan.AutoChildEventHandler;
 import gg.xp.reevent.scan.AutoFeed;
@@ -27,6 +28,7 @@ import gg.xp.xivsupport.events.state.combatstate.ActiveCastRepository;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectCurrentStatus;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectRepository;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
+import gg.xp.xivsupport.events.triggers.marks.adv.AutoMarkServiceSelector;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerConcurrencyMode;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerController;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerTimeoutException;
@@ -59,6 +61,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -82,9 +85,17 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	private ActiveCastRepository casts;
 	private StatusEffectRepository buffs;
 	private DmuDebuffMarks kefkaMarks;
+	private boolean kefkaAutoMarksEnabled = true;
+	private volatile long kefkaMarkerGeneration;
 
 	private EnumSetting<CleanseCallOption> cleanseCallSetting;
 	private BooleanSetting doubleTowerOnlyWithNoDebuff;
+
+	public DMU(XivState state, ActiveCastRepository casts, StatusEffectRepository buffs, PersistenceProvider pers,
+	           AutoMarkServiceSelector selector) {
+		this(state, casts, buffs, pers);
+		selector.addListener(this::retireKefkaMarks);
+	}
 
 	public DMU(XivState state, ActiveCastRepository casts, StatusEffectRepository buffs, PersistenceProvider pers) {
 		this.state = state;
@@ -99,6 +110,24 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	@Override
 	public boolean enabled(EventContext context) {
 		return state.dutyIs(KnownDuty.DMU);
+	}
+
+	public synchronized void setKefkaAutoMarksEnabled(boolean enabled) {
+		if (kefkaAutoMarksEnabled != enabled) {
+			retireKefkaMarks();
+			kefkaAutoMarksEnabled = enabled;
+		}
+	}
+
+	private synchronized void retireKefkaMarks() {
+		kefkaMarkerGeneration++;
+		kefkaMarks.clear(event -> {});
+	}
+
+	private synchronized void startKefkaMarks(long generation, List<BuffApplied> debuffs, Consumer<Event> emit) {
+		if (kefkaAutoMarksEnabled && generation == kefkaMarkerGeneration) {
+			kefkaMarks.start(debuffs, emit);
+		}
 	}
 
 	/*
@@ -2150,7 +2179,10 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	}
 
 	@HandleEvents(order = 100)
-	public void maintainKefkaMarks(EventContext context, BaseEvent event) {
+	public synchronized void maintainKefkaMarks(EventContext context, BaseEvent event) {
+		if (!kefkaAutoMarksEnabled) {
+			return;
+		}
 		if (event instanceof WipeEvent || event instanceof PullStartedEvent
 				|| event instanceof ZoneChangeEvent
 				|| event instanceof AbilityCastStart cast && cast.abilityIdMatches(0xC2DC)) {
@@ -2305,6 +2337,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	private final SequentialTrigger<BaseEvent> kefkaSaysSqExdeath = SqtTemplates.sq(180_000,
 			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xC2DC),
 			(e1, s) -> {
+				long markerGeneration = kefkaMarkerGeneration;
 
 				// Tracks which debuffs are fake
 				Set<BuffApplied> fakeDebuffs = new HashSet<>();
@@ -2377,7 +2410,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 							}
 						})
 						.toList();
-				kefkaMarks.start(Stream.concat(allDebuffs1.stream(), allDebuffs2.stream()).toList(), s::accept);
+				startKefkaMarks(markerGeneration, Stream.concat(allDebuffs1.stream(), allDebuffs2.stream()).toList(), s::accept);
 				var myDebuffs2 = allDebuffs2.stream()
 						.filter(ba -> ba.getTarget().isThePlayer())
 						.toList();

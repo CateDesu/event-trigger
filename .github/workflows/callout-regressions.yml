@@ -23,23 +23,39 @@ jobs:
           cache: maven
       - name: Install display dependencies
         run: sudo apt-get update && sudo apt-get install -y xvfb
-      - name: Verify callout pipeline
+      - name: Verify callout and automarker pipeline
         run: |
-          xvfb-run -a mvn -q -pl :trigger-support,:triggers-dt -am \
-            '-Dtest=MonitoringEventDistributorTest,Sequential*Test,Dmu*Test,CrossFightFaultInjectionTest,M1sTest,M2sTest,FRUTest' \
+          xvfb-run -a mvn -q -pl :trigger-support,:triggers-dt,:triggers-ew,:titan-jails,:telesto-core -am \
+            '-Dtest=MonitoringEventDistributorTest,PullRecoveryTest,PlayerMarkerRepositoryRegressionTest,MultiSlotAutoMarkHandlerRegressionTest,Sequential*Test,Dmu*Test,CrossFightFaultInjectionTest,M1sTest,M2sTest,FRUTest,JailAutomarkRegressionTest,JailExampleTest,OmegaAutomarkRegressionTest,DragonsongAutomarkRegressionTest,TopTest,DsrTest,TelestoAutomarkRegressionTest' \
             -Dsurefire.failIfNoSpecifiedTests=false clean test
           python3 - <<'PY'
           from pathlib import Path
           import xml.etree.ElementTree as ET
           root = Path('.')
-          reports = [report for folder in ("xivsupport", "trigger-support", "triggers/triggers-dt")
+          reports = [report for folder in ("xivsupport", "trigger-support", "triggers/triggers-dt",
+                                          "triggers/triggers-ew", "triggers/titan-jails", "telesto-support/telesto-core")
                      for report in (root / folder / "target/surefire-reports").glob("TEST-*.xml")]
           ran = {case.get("classname") for report in reports for case in ET.parse(report).iter("testcase")
                  if case.find("skipped") is None}
           required = {"gg.xp.reevent.events.MonitoringEventDistributorTest",
+                      "gg.xp.xivsupport.replay.PullRecoveryTest",
+                      "gg.xp.xivsupport.events.state.playermarkers.PlayerMarkerRepositoryRegressionTest",
+                      "gg.xp.xivsupport.events.triggers.marks.MultiSlotAutoMarkHandlerRegressionTest",
                       "gg.xp.xivsupport.events.triggers.seq.SequentialTriggerLifecycleTest",
-                      "gg.xp.xivsupport.events.triggers.util.CrossFightFaultInjectionTest"}
+                      "gg.xp.xivsupport.events.triggers.util.CrossFightFaultInjectionTest",
+                      "gg.xp.xivsupport.events.JailAutomarkRegressionTest",
+                      "gg.xp.xivsupport.events.JailExampleTest",
+                      "gg.xp.xivsupport.triggers.ultimate.DmuRegressionTest",
+                      "gg.xp.xivsupport.events.triggers.endwalker.ultimate.TopTest",
+                      "gg.xp.xivsupport.events.triggers.endwalker.ultimate.DsrTest",
+                      "gg.xp.xivsupport.events.triggers.endwalker.ultimate.OmegaAutomarkRegressionTest",
+                      "gg.xp.xivsupport.events.triggers.endwalker.ultimate.DragonsongAutomarkRegressionTest",
+                      "gg.xp.telestosupport.TelestoAutomarkRegressionTest"}
           if required - ran:
               raise SystemExit(f"Missing native regressions: {sorted(required - ran)}")
+          skipped = [case.get("classname") for report in reports for case in ET.parse(report).iter("testcase")
+                     if case.get("classname") in required and case.find("skipped") is not None]
+          if skipped:
+              raise SystemExit(f"Skipped required native regressions: {sorted(set(skipped))}")
           print("Required native regression classes ran")
           PY

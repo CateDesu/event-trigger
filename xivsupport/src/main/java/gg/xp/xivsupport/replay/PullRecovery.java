@@ -14,6 +14,8 @@ import gg.xp.xivsupport.events.actlines.events.actorcontrol.VictoryEvent;
 import gg.xp.xivsupport.events.actlines.parsers.ActLineParseFailureEvent;
 import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
 import gg.xp.xivsupport.events.misc.pulls.PullEndedEvent;
+import gg.xp.xivsupport.events.state.PartyChangeEvent;
+import gg.xp.xivsupport.events.state.PartyForceOrderChangeEvent;
 import gg.xp.xivsupport.events.delaytest.BaseDelayedEvent;
 import gg.xp.xivsupport.events.ws.ActWsRawMsg;
 import gg.xp.xivsupport.sys.KnownLogSource;
@@ -155,8 +157,9 @@ public final class PullRecovery implements EventHandler<Event> {
         return skipped.get();
     }
 
-    public void cancelPendingOutput() {
-        outputGeneration.incrementAndGet();
+    public BooleanSupplier cancelPendingOutput() {
+        long generation = outputGeneration.incrementAndGet();
+        return () -> !clock.replaying() && outputGeneration.get() == generation;
     }
 
     /** A queued output may wait for its configured delay within the same pull. */
@@ -167,7 +170,7 @@ public final class PullRecovery implements EventHandler<Event> {
 
     @Override
     public int getOrder() {
-        return Integer.MIN_VALUE;
+        return Integer.MIN_VALUE + 1;
     }
 
     @Override
@@ -177,7 +180,9 @@ public final class PullRecovery implements EventHandler<Event> {
         }
         if (event instanceof ZoneChangeEvent || event instanceof WipeEvent
                 || event instanceof FadeOutEvent || event instanceof VictoryEvent || event instanceof PullEndedEvent
-                || event instanceof DutyCommenceEvent || event instanceof PullStartedEvent) {
+                || event instanceof DutyCommenceEvent || event instanceof PullStartedEvent
+                || event instanceof PartyChangeEvent party && party.isMarkerRosterChanged()
+                || event instanceof PartyForceOrderChangeEvent forced && forced.isMarkerRosterChanged()) {
             cancelPendingOutput();
         }
         if (event instanceof BaseEvent base) {

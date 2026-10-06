@@ -4,6 +4,7 @@ import gg.xp.reevent.context.StateStore;
 import gg.xp.reevent.events.BaseEvent;
 import gg.xp.reevent.events.Event;
 import gg.xp.reevent.events.EventContext;
+import gg.xp.services.ServiceDescriptor;
 import gg.xp.xivdata.data.Job;
 import gg.xp.xivsupport.callouts.RawModifiedCallout;
 import gg.xp.xivsupport.events.actlines.events.*;
@@ -15,6 +16,7 @@ import gg.xp.xivsupport.events.state.combatstate.CastTracker;
 import gg.xp.xivsupport.events.state.combatstate.StatusEffectRepository;
 import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
 import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkRequest;
+import gg.xp.xivsupport.events.triggers.marks.adv.AutoMarkServiceSelector;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerFailedEvent;
 import gg.xp.xivsupport.models.*;
@@ -66,6 +68,7 @@ public class DmuRegressionTest {
 		final AtomicReference<Instant> clock = new AtomicReference<>(Instant.now());
 		final StatusEffectRepository buffs = new StatusEffectRepository(null, null);
 		final DMU pack;
+		final AutoMarkServiceSelector selector = new AutoMarkServiceSelector(new InMemoryMapPersistenceProvider(), null);
 		final List<SequentialTrigger<BaseEvent>> sequences = new ArrayList<>();
 
 		Harness() {
@@ -78,7 +81,7 @@ public class DmuRegressionTest {
 				@Override public CastTracker getCastFor(XivCombatant combatant) { return null; }
 				@Override public List<CastTracker> getAll() { return List.of(); }
 			};
-			pack = new DMU(state, casts, buffs, new InMemoryMapPersistenceProvider());
+			pack = new DMU(state, casts, buffs, new InMemoryMapPersistenceProvider(), selector);
 		}
 
 		@SuppressWarnings("unchecked")
@@ -257,6 +260,113 @@ public class DmuRegressionTest {
 			Assert.assertEquals(h.context.marks().size(), 1);
 			Assert.assertEquals(h.context.marks().get(0).getPlayerToMark(), player(1));
 			Assert.assertEquals(h.context.marks().get(0).getMarker(), MarkerSign.CLEAR);
+		}
+	}
+
+	@Test
+	public void localKefkaOwnershipRetiresNativeMarksWithoutClearingLocalSigns() throws Exception {
+		try (Harness h = new Harness()) {
+			h.select("kefkaSaysSqExdeath");
+			List<BuffApplied> first = startKefkaDebuffs(h);
+			Assert.assertEquals(h.context.marks().size(), 6);
+			h.context.events.clear();
+			h.pack.setKefkaAutoMarksEnabled(false);
+			h.context.accept(new SpecificAutoMarkRequest(player(1), MarkerSign.BIND3));
+			h.remove(first.get(0));
+			h.tick(60_000);
+			Assert.assertEquals(h.context.marks().size(), 1, "Native expiry cannot clear the local owner's sign");
+			Assert.assertEquals(h.context.marks().get(0).getMarker(), MarkerSign.BIND3);
+			h.context.events.clear();
+			h.pack.setKefkaAutoMarksEnabled(true);
+			h.feed(new WipeEvent());
+			Assert.assertTrue(h.context.marks().isEmpty(), "Re-enabling cannot revive the old native ownership");
+			startKefkaDebuffs(h);
+			Assert.assertEquals(h.context.marks().size(), 6, "A new mechanic still supports native marks");
+		}
+	}
+
+	@Test
+	public void disabledKefkaOwnerEmitsNoAssignmentsOrClears() throws Exception {
+		try (Harness h = new Harness()) {
+			h.select("kefkaSaysSqExdeath");
+			h.pack.setKefkaAutoMarksEnabled(false);
+			startKefkaDebuffs(h);
+			h.feed(new WipeEvent());
+			Assert.assertTrue(h.context.marks().isEmpty());
+		}
+	}
+
+	@Test
+	public void serviceChangeRetiresKefkaClearsWhileSpeechSequenceStaysActive() throws Exception {
+		try (Harness h = new Harness()) {
+			h.select("kefkaSaysSqExdeath");
+			List<BuffApplied> first = startKefkaDebuffs(h);
+			Assert.assertEquals(h.context.marks().size(), 6);
+			h.context.events.clear();
+			h.selector.setCurrent(null);
+			h.selector.setCurrent(h.selector.getOptions().get(0));
+			Assert.assertTrue(h.sequences.get(0).isActive(), "Service change preserves the speech sequence");
+			h.remove(first.get(0));
+			h.tick(60_000);
+			Assert.assertTrue(h.context.marks().isEmpty(), "Old native owners cannot clear a new service epoch");
+		}
+	}
+
+	private static List<BuffApplied> startKefkaDebuffs(Harness h) {
+		return startKefkaDebuffs(h, () -> {});
+	}
+
+	private static List<BuffApplied> startKefkaDebuffs(Harness h, Runnable afterFirstWave) {
+		h.cast(0xC2DC);
+		XivCombatant kefka = npc(18475, null);
+		XivCombatant exdeath = npc(19510, null);
+		List<BuffApplied> first = new ArrayList<>();
+		for (int wave = 0; wave < 2; wave++) {
+			h.feed(new HeadMarkerEvent(kefka, 673));
+			h.feed(new HeadMarkerEvent(kefka, 675));
+			h.feed(new StatusLoopVfxApplied(exdeath,
+					new BuffApplied(new XivStatusEffect(0), 90, BOSS, exdeath, 1122)));
+			long[] ids = {0x15A8, 0x15A8, 0x15A9, 0x15A9, 0x15A7, 0x15A7, 0x15AA, 0x15AA, 0x15AA, 0x15AA};
+			int[] targets = wave == 0 ? new int[]{1, 2, 3, 4, 5, 6, 0, 5, 6, 7}
+					: new int[]{3, 4, 1, 2, 0, 7, 3, 4, 5, 6};
+			for (int i = 0; i < ids.length; i++) {
+				BuffApplied buff = h.buff(ids[i], wave == 0 ? 45 : 75, targets[i]);
+				if (wave == 0) { first.add(buff); }
+			}
+			h.tick(200);
+			h.tick(200);
+			if (wave == 0) { afterFirstWave.run(); }
+		}
+		return first;
+	}
+
+	@DataProvider
+	public Object[][] kefkaControlChanges() { return new Object[][]{{true}, {false}}; }
+
+	@Test(dataProvider = "kefkaControlChanges")
+	public void controlChangesBeforeMarkingKeepOldSpeechWithoutRevivingMarks(boolean service) throws Exception {
+		try (Harness h = new Harness()) {
+			var capture = h.selector.register(ServiceDescriptor.of("capture", "Capture", 20));
+			var none = h.selector.getOptions().stream()
+					.filter(option -> option.descriptor().id().equals("none")).findFirst().orElseThrow();
+			h.select("kefkaSaysSqExdeath");
+			startKefkaDebuffs(h, () -> {
+				Assert.assertTrue(h.context.marks().isEmpty(), "Control changes before native marking starts");
+				if (service) {
+					h.selector.setCurrent(none);
+					h.selector.setCurrent(capture);
+				}
+				else {
+					h.pack.setKefkaAutoMarksEnabled(false);
+					h.pack.setKefkaAutoMarksEnabled(true);
+				}
+			});
+			Assert.assertTrue(h.context.marks().isEmpty(), "Old debuff waves cannot start marks in a new control generation");
+			Assert.assertTrue(h.sequences.get(0).isActive(), "The speech sequence remains active");
+			Assert.assertTrue(h.context.calls().contains("Kefka Says: Real Accel, Short (First Set Applied)"));
+			h.feed(new WipeEvent());
+			startKefkaDebuffs(h);
+			Assert.assertEquals(h.context.marks().size(), 6, "A fresh mechanic supports native marking");
 		}
 	}
 

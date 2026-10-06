@@ -45,6 +45,10 @@ public class JobSortOverrideSetting extends JobSortSetting {
 		}
 	}
 
+	public List<Job> getOwnJobOrder() {
+		return super.getJobOrder();
+	}
+
 	@Override
 	protected Comparator<Job> getDefaultSort() {
 		if (parent == null) {

@@ -595,21 +595,23 @@ public class XivStateImpl implements XivState {
 
 	@HandleEvents(order = Integer.MIN_VALUE)
 	public void partyChange(EventContext context, PartyChangeEvent event) {
+		event.setMarkerRosterChanged(!partyMembers(partyListRaw).equals(partyMembers(event.getMembers())));
 		setPartyList(event.getMembers());
+	}
+
+	private record PartyMember(long id, int job) {}
+
+	private static List<PartyMember> partyMembers(List<RawXivPartyInfo> members) {
+		return members.stream().filter(RawXivPartyInfo::isInParty)
+				.map(member -> new PartyMember(member.getId(), member.getJobId())).toList();
 	}
 
 	@HandleEvents(order = Integer.MIN_VALUE)
 	public void partyForceOrderChange(EventContext context, PartyForceOrderChangeEvent event) {
 		List<Long> newMembers = event.getMembers();
-		if (newMembers == null) {
-			partyListForceOrder = null;
-		}
-		else if (newMembers.isEmpty()) {
-			partyListForceOrder = null;
-		}
-		else {
-			partyListForceOrder = newMembers;
-		}
+		List<Long> normalized = newMembers == null || newMembers.isEmpty() ? null : newMembers;
+		event.setMarkerRosterChanged(!Objects.equals(partyListForceOrder, normalized));
+		partyListForceOrder = normalized;
 		recalcState();
 	}
 

@@ -1,6 +1,7 @@
 package gg.xp.xivsupport.events.triggers.duties;
 
 import gg.xp.reevent.events.BaseEvent;
+import gg.xp.reevent.events.Event;
 import gg.xp.reevent.events.EventContext;
 import gg.xp.reevent.scan.AutoChildEventHandler;
 import gg.xp.reevent.scan.AutoFeed;
@@ -28,8 +29,10 @@ import gg.xp.xivsupport.events.triggers.marks.AutoMarkRequest;
 import gg.xp.xivsupport.events.triggers.marks.ClearAutoMarkRequest;
 import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
 import gg.xp.xivsupport.events.triggers.marks.adv.MultiSlotAutoMarkHandler;
+import gg.xp.xivsupport.events.triggers.marks.adv.AutoMarkServiceSelector;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerController;
+import gg.xp.xivsupport.events.triggers.seq.SqtTemplates;
 import gg.xp.xivsupport.gui.tables.renderers.RefreshingHpBar;
 import gg.xp.xivsupport.models.ArenaPos;
 import gg.xp.xivsupport.models.ArenaSector;
@@ -51,11 +54,14 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -223,6 +229,14 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 	private final StatusEffectRepository buffs;
 	private final HeadmarkerOffsetTracker headmarkerOffsetTracker;
 
+	private final AtomicLong markerGeneration = new AtomicLong();
+
+	public Dragonsong(XivState state, StatusEffectRepository buffs, PersistenceProvider pers,
+	                  HeadmarkerOffsetTracker headmarkerOffsetTracker, AutoMarkServiceSelector selector) {
+		this(state, buffs, pers, headmarkerOffsetTracker);
+		selector.addListener(this::resetAutomarks);
+	}
+
 	public Dragonsong(XivState state, StatusEffectRepository buffs, PersistenceProvider pers, HeadmarkerOffsetTracker headmarkerOffsetTracker) {
 		this.state = state;
 		this.buffs = buffs;
@@ -244,6 +258,22 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 						DragonsongWrothAssignments.Nothing_1, legacyAltMode ? MarkerSign.BIND2 : MarkerSign.IGNORE1,
 						DragonsongWrothAssignments.Nothing_2, MarkerSign.IGNORE2
 				));
+		p5_thunderstruckAutoMarks.addListener(this::resetAutomarks);
+		p6_useAutoMarks.addListener(this::resetAutomarks);
+	}
+
+	private void resetAutomarks() {
+		markerGeneration.incrementAndGet();
+		lightningMarked.clear();
+	}
+
+	private Consumer<Event> automarkOutput(Consumer<Event> output) {
+		long generation = markerGeneration.get();
+		return event -> {
+			if (markerGeneration.get() == generation) {
+				output.accept(event);
+			}
+		};
 	}
 
 	@Override
@@ -312,6 +342,7 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 	@HandleEvents
 	public void zoneChange(EventContext context, ZoneChangeEvent zce) {
 		isSecondPhase = false;
+		lightningMarked.clear();
 	}
 
 	@HandleEvents
@@ -874,7 +905,7 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 				log.info("Haurch HP tracker end");
 			});
 
-	private boolean needAmClear;
+	private final Set<XivPlayerCharacter> lightningMarked = new HashSet<>();
 
 	@HandleEvents
 	public void lightning(EventContext context, BuffApplied event) {
@@ -883,26 +914,25 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 			if (target.isThePlayer()) {
 				context.accept(thordan2_trio1_lightningOnYou.getModified(event));
 			}
-			if (p5_thunderstruckAutoMarks.get() && target instanceof XivPlayerCharacter pc) {
+			if (p5_thunderstruckAutoMarks.get() && target instanceof XivPlayerCharacter pc && lightningMarked.add(pc)) {
 				context.accept(new AutoMarkRequest(pc));
-				needAmClear = true;
 			}
 		}
 	}
 
 	@HandleEvents
 	public void lightningClearAm(EventContext context, AbilityUsedEvent aue) {
-		if (needAmClear && aue.abilityIdMatches(0x62DA)) {
+		if (!lightningMarked.isEmpty() && aue.abilityIdMatches(0x62DA)) {
 			context.accept(new ClearAutoMarkRequest());
-			needAmClear = false;
+			lightningMarked.clear();
 		}
 	}
 
 	@HandleEvents
 	public void lightningClearAm(EventContext context, PullStartedEvent pse) {
-		if (needAmClear) {
+		if (!lightningMarked.isEmpty()) {
 			context.accept(new ClearAutoMarkRequest());
-			needAmClear = false;
+			lightningMarked.clear();
 		}
 	}
 
@@ -1029,14 +1059,16 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 	}
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> p6_wrothFlames = new SequentialTrigger<>(40_000, BaseEvent.class,
+	private final SequentialTrigger<BaseEvent> p6_wrothFlames = SqtTemplates.sq(40_000, AbilityUsedEvent.class,
 			// Start on Wroth Flames cast
-			be -> be instanceof AbilityUsedEvent aue && aue.getAbility().getId() == 0x6D45,
+			aue -> aue.abilityIdMatches(0x6D45),
 			(e1, s) -> {
+				Consumer<Event> marks = automarkOutput(s::accept);
 				log.info("Wroth Flames: Begin");
+				Set<XivCombatant> seen = new HashSet<>();
 				// extra stop condition is for if people are dead
 				List<BuffApplied> buffs = s.waitEventsUntil(6,
-						BuffApplied.class, ba -> ba.buffIdMatches(2758, 2759),
+						BuffApplied.class, ba -> ba.buffIdMatches(2758, 2759) && seen.add(ba.getTarget()),
 						// Stop on Akh Morn
 						AbilityCastStart.class, acs -> acs.abilityIdMatches(0x6D46));
 				log.info("Wroth Flames: Collected buffs: {}", buffs);
@@ -1101,11 +1133,11 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 					playerMechs.values().forEach(list -> list.sort(finalSort));
 					log.info("Wroth player mechs, sorted: {}", playerMechs);
 
-					List<XivPlayerCharacter> spreaders = playerMechs.get(WrothFlamesRole.SPREAD);
-					List<XivPlayerCharacter> stackers = playerMechs.get(WrothFlamesRole.STACK);
+					List<XivPlayerCharacter> spreaders = playerMechs.getOrDefault(WrothFlamesRole.SPREAD, List.of());
+					List<XivPlayerCharacter> stackers = playerMechs.getOrDefault(WrothFlamesRole.STACK, List.of());
 					List<XivPlayerCharacter> otherStackers = playerMechs.get(WrothFlamesRole.NOTHING);
 
-					MultiSlotAutoMarkHandler<DragonsongWrothAssignments> handler = new MultiSlotAutoMarkHandler<>(s::accept, getP6_amAssignments());
+					MultiSlotAutoMarkHandler<DragonsongWrothAssignments> handler = new MultiSlotAutoMarkHandler<>(marks, getP6_amAssignments());
 
 					// Give out markers
 					for (int i = 0; i < Math.min(spreaders.size(), 4); i++) {
@@ -1131,7 +1163,7 @@ public class Dragonsong extends AutoChildEventHandler implements FilteredEventHa
 					}
 
 					s.waitMs(25_000);
-					s.accept(new ClearAutoMarkRequest());
+					marks.accept(new ClearAutoMarkRequest());
 				}
 			}
 	);

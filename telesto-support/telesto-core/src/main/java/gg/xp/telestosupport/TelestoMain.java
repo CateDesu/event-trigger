@@ -33,6 +33,8 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -41,10 +43,11 @@ public class TelestoMain implements FilteredEventHandler {
 
 	private static final Logger log = LoggerFactory.getLogger(TelestoMain.class);
 	// Being used as a queue
-	private static final ExecutorService queueExs = Executors.newSingleThreadExecutor();
+	private final ExecutorService queueExs = Executors.newSingleThreadExecutor();
 	// Handles the actual execution
-	private static final ExecutorService exs = Executors.newCachedThreadPool();
-	private final HttpClient http = HttpClient.newBuilder().build();
+	private static final ExecutorService exs = Executors.newSingleThreadExecutor();
+	private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(3);
+	private final HttpClient http = HttpClient.newBuilder().connectTimeout(REQUEST_TIMEOUT).build();
 	private final ObjectMapper mapper = new ObjectMapper();
 	private final HttpURISetting uriSetting;
 	private final BooleanSetting enablePartyList;
@@ -61,6 +64,9 @@ public class TelestoMain implements FilteredEventHandler {
 	private final IntSetting commandDelayPlus;
 	private volatile Predicate<TelestoOutgoingMessage> outgoingGate = message -> true;
 	private volatile Supplier<BooleanSupplier> deliveryPermit = () -> () -> true;
+	private volatile Supplier<BooleanSupplier> deliveryFailure = () -> () -> true;
+	private long scheduledDispatch;
+	private BooleanSupplier scheduledPermit = () -> false;
 
 	/** Check freshness before the configured delay starts. */
 	public void setOutgoingGate(Predicate<TelestoOutgoingMessage> gate) {
@@ -70,6 +76,10 @@ public class TelestoMain implements FilteredEventHandler {
 	/** Capture cancellation state before a message enters the delay queue. */
 	public void setDeliveryPermit(Supplier<BooleanSupplier> permit) {
 		deliveryPermit = permit;
+	}
+
+	public void setDeliveryFailure(Supplier<BooleanSupplier> failure) {
+		deliveryFailure = failure;
 	}
 
 	public TelestoMain(EventMaster master, PersistenceProvider pers, PrimaryLogSource pls) {
@@ -151,7 +161,7 @@ public class TelestoMain implements FilteredEventHandler {
 	}
 
 	public @Nullable HttpResponse<String> sendMessageDirectly(TelestoOutgoingMessage msg) {
-		BooleanSupplier permit = deliveryPermit.get();
+		BooleanSupplier permit = capturePermit(msg);
 		if (!enabled() || !outgoingGate.test(msg)) {
 			return null;
 		}
@@ -173,6 +183,7 @@ public class TelestoMain implements FilteredEventHandler {
 			HttpResponse<String> response = http.send(
 					HttpRequest
 							.newBuilder(uriSetting.get())
+							.timeout(REQUEST_TIMEOUT)
 							.POST(
 									HttpRequest.BodyPublishers
 											.ofString(
@@ -184,6 +195,9 @@ public class TelestoMain implements FilteredEventHandler {
 			return response;
 		}
 		catch (IOException | InterruptedException e) {
+			if (e instanceof InterruptedException) {
+				Thread.currentThread().interrupt();
+			}
 			if (logLabel != null) {
 				log.info("Telesto error for label '{}'", logLabel, e);
 			}
@@ -192,39 +206,91 @@ public class TelestoMain implements FilteredEventHandler {
 
 	}
 
+	private BooleanSupplier capturePermit(TelestoOutgoingMessage msg) {
+		return capturePermit(msg, uriSetting.get());
+	}
+
+	private BooleanSupplier capturePermit(TelestoOutgoingMessage msg, URI uri) {
+		BooleanSupplier permit = deliveryPermit.get();
+		return () -> permit.getAsBoolean() && uri.equals(uriSetting.get())
+				&& (msg.getJson().path("id").asLong() != PARTY_UPDATE_ID || enablePartyList.get());
+	}
+
+	private void reportFailure(BaseTelestoResponse error, URI admittedUri) {
+		BooleanSupplier permit = deliveryFailure.get();
+		error.setDeliveryPermit(() -> permit.getAsBoolean() && admittedUri.equals(uriSetting.get()));
+		master.pushEvent(error);
+		if (error.isCurrent()) {
+			updateStatus(TelestoStatus.BAD);
+		}
+	}
+
 	@HandleEvents
 	public void handleMessage(EventContext context, TelestoOutgoingMessage msg) {
-		BooleanSupplier permit = deliveryPermit.get();
+		URI admittedUri = uriSetting.get();
+		BooleanSupplier permit = capturePermit(msg, admittedUri);
 		if (!enabled() || !outgoingGate.test(msg)) {
 			return;
 		}
+		int delay = msg.shouldDelay() ? (int) (commandDelayBase.get() + Math.random() * commandDelayPlus.get()) : 0;
+		long deadline;
+		synchronized (this) {
+			long now = System.nanoTime();
+			if (!scheduledPermit.getAsBoolean()) {
+				scheduledDispatch = now;
+			}
+			if (msg.shouldDelay()) {
+				scheduledDispatch = Math.max(now, scheduledDispatch) + TimeUnit.MILLISECONDS.toNanos(delay);
+				scheduledPermit = permit;
+				deadline = scheduledDispatch + REQUEST_TIMEOUT.toNanos();
+			}
+			else {
+				deadline = Long.MAX_VALUE;
+			}
+		}
 		Runnable task = () -> {
 			try {
+				if (!permit.getAsBoolean()) {
+					return;
+				}
+				if (msg.shouldDelay() && System.nanoTime() > deadline) {
+					throw new TimeoutException("Queued Telesto command expired");
+				}
 				log.trace("Telesto message done");
 				HttpResponse<String> response = sendMessageDirectly(msg, permit);
 				if (response == null) {
 					return;
 				}
+				if (!permit.getAsBoolean()) {
+					return;
+				}
 				if (response.statusCode() == 200) {
 					TelestoResponse event = new TelestoResponse(mapper.readValue(response.body(), new TypeReference<>() {
 					}));
+					if (event.getId() != msg.getJson().path("id").asLong()
+							&& !(event.getId() == -1 && msg.getJson().path("type").asText().equals("ExecuteCommand"))) {
+						throw new IllegalArgumentException("Unexpected Telesto response ID");
+					}
 					event.setResponseTo(msg);
+					event.setDeliveryPermit(permit);
 					master.pushEvent(event);
+					updateStatus(TelestoStatus.GOOD);
 				}
 				else {
 					TelestoHttpError error = new TelestoHttpError(response);
 					error.setResponseTo(msg);
-					master.pushEvent(error);
+					reportFailure(error, admittedUri);
 					log.error("Error in Telesto response: {} {}", response.statusCode(), response.body());
 				}
-				updateStatus(TelestoStatus.GOOD);
 			}
 			catch (Throwable e) {
+				if (!permit.getAsBoolean()) {
+					return;
+				}
 				log.error("Error sending Telesto message {}", e.toString());
 				TelestoConnectionError error = new TelestoConnectionError(e);
 				error.setResponseTo(msg);
-				master.pushEvent(error);
-				updateStatus(TelestoStatus.BAD);
+				reportFailure(error, admittedUri);
 			}
 		};
 		if (msg.shouldDelay()) {
@@ -234,15 +300,13 @@ public class TelestoMain implements FilteredEventHandler {
 				}
 				try {
 					// Insert delay to avoid spamming
-					int delay = (int) (commandDelayBase.get() + (Math.random() * commandDelayPlus.get()));
 					Thread.sleep(delay);
 				}
 				catch (InterruptedException e) {
-					log.error("Interrupted", e);
+					Thread.currentThread().interrupt();
+					return;
 				}
-				finally {
-					exs.submit(task);
-				}
+				task.run();
 			});
 		}
 		else {

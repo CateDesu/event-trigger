@@ -1,6 +1,8 @@
 package gg.xp.xivsupport.events.triggers.jails;
 
 import gg.xp.reevent.events.EventContext;
+import gg.xp.reevent.events.BaseEvent;
+import gg.xp.reevent.events.Event;
 import gg.xp.reevent.scan.FilteredEventHandler;
 import gg.xp.reevent.scan.HandleEvents;
 import gg.xp.xivdata.data.duties.KnownDuty;
@@ -16,8 +18,15 @@ import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
 import gg.xp.xivsupport.events.actlines.events.actorcontrol.DutyCommenceEvent;
 import gg.xp.xivsupport.events.debug.DebugCommand;
 import gg.xp.xivsupport.events.state.XivState;
+import gg.xp.xivsupport.events.state.PartyChangeEvent;
+import gg.xp.xivsupport.events.state.PartyForceOrderChangeEvent;
 import gg.xp.xivsupport.events.triggers.marks.AutoMarkRequest;
+import gg.xp.xivsupport.events.triggers.marks.AutoMarkSlotRequest;
 import gg.xp.xivsupport.events.triggers.marks.ClearAutoMarkRequest;
+import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkRequest;
+import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
+import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkSlotRequest;
+import gg.xp.xivsupport.events.triggers.marks.adv.AutoMarkServiceSelector;
 import gg.xp.xivsupport.models.XivCombatant;
 import gg.xp.xivsupport.models.XivEntity;
 import gg.xp.xivsupport.models.XivPlayerCharacter;
@@ -50,11 +59,21 @@ public class JailSolver implements FilteredEventHandler, OverridesCalloutGroupEn
 	private final BooleanSetting overrideZoneLock;
 	private final XivState state;
 	private final LongSetting jailClearDelay;
+	private volatile JailAutoMarkClear pendingClear;
+	private FinalTitanJailsSolvedEvent pendingOwner;
+	private final List<AutoMarkRequest> pendingMarks = new ArrayList<>();
 
-	// TODO: scope - this is a perfect opportunity
+	public static final class JailAutoMarkClear extends BaseEvent {}
+
+	public JailSolver(PersistenceProvider persistence, XivState state, AutoMarkServiceSelector selector) {
+		this(persistence, state);
+		selector.addListener(() -> pendingClear = null);
+	}
+
 	public JailSolver(PersistenceProvider persistence, XivState state) {
 		enableTts = new BooleanSetting(persistence, "jail-solver.tts.enable", true);
 		enableAutomark = new BooleanSetting(persistence, "jail-solver.automark.enable", true);
+		enableAutomark.addListener(() -> pendingClear = null);
 		overrideZoneLock = new BooleanSetting(persistence, "jail-solver.override-zone-lock", false);
 		this.state = state;
 		jailClearDelay = new LongSetting(persistence, "jail-solver.clear-delay", 10000L);
@@ -96,18 +115,31 @@ public class JailSolver implements FilteredEventHandler, OverridesCalloutGroupEn
 
 	@HandleEvents
 	public void handleWipe(EventContext context, DutyCommenceEvent event) {
-		// TODO: this one can replace the other two but it needs testing
-		clearJails();
+		clearOwnedJails(context);
 	}
 
 	@HandleEvents
 	public void handleWipe(EventContext context, WipeEvent event) {
-		clearJails();
+		clearOwnedJails(context);
 	}
 
 	@HandleEvents
 	public void handleWipe(EventContext context, ZoneChangeEvent event) {
-		clearJails();
+		resetJails();
+	}
+
+	@HandleEvents
+	public void partyChanged(EventContext context, PartyChangeEvent event) {
+		if (event.isMarkerRosterChanged()) {
+			pendingClear = null;
+		}
+	}
+
+	@HandleEvents
+	public void partyChanged(EventContext context, PartyForceOrderChangeEvent event) {
+		if (event.isMarkerRosterChanged()) {
+			pendingClear = null;
+		}
 	}
 
 	private void clearJails() {
@@ -115,10 +147,24 @@ public class JailSolver implements FilteredEventHandler, OverridesCalloutGroupEn
 		jailedPlayers.clear();
 	}
 
+	private void resetJails() {
+		clearJails();
+		pendingClear = null;
+		pendingOwner = null;
+		pendingMarks.clear();
+	}
+
+	private void clearOwnedJails(EventContext context) {
+		if (pendingClear != null) {
+			context.accept(new ClearAutoMarkRequest());
+		}
+		resetJails();
+	}
+
 	@HandleEvents
 	public void amResetManual(EventContext context, DebugCommand event) {
 		if (event.getCommand().equals("jailreset")) {
-			clearJails();
+			resetJails();
 		}
 	}
 
@@ -148,8 +194,11 @@ public class JailSolver implements FilteredEventHandler, OverridesCalloutGroupEn
 			return;
 		}
 		XivCombatant target = event.getTarget();
-		if (target instanceof XivPlayerCharacter pc) {
+		if (target instanceof XivPlayerCharacter pc && jailedPlayers.size() < 3 && !jailedPlayers.contains(pc)) {
 			jailedPlayers.add(pc);
+		}
+		else {
+			return;
 		}
 		log.info("Jailed Players: {}", jailedPlayers.stream().map(XivEntity::getName).collect(Collectors.joining(", ")));
 
@@ -201,15 +250,62 @@ public class JailSolver implements FilteredEventHandler, OverridesCalloutGroupEn
 		if (enableAutomark.get()) {
 			List<XivPlayerCharacter> playersToMark = event.getJailedPlayers();
 			log.info("Requesting to mark jailed players: {}", playersToMark.stream().map(XivEntity::getName).collect(Collectors.joining(", ")));
-			context.accept(new AutoMarkRequest(playersToMark.get(0)));
-			context.accept(new AutoMarkRequest(playersToMark.get(1)));
-			context.accept(new AutoMarkRequest(playersToMark.get(2)));
-			ClearAutoMarkRequest clear = new ClearAutoMarkRequest();
+			pendingMarks.clear();
+			playersToMark.forEach(player -> pendingMarks.add(new AutoMarkRequest(player)));
+			JailAutoMarkClear clear = new JailAutoMarkClear();
+			pendingClear = clear;
+			pendingOwner = event;
+			List.copyOf(pendingMarks).forEach(context::accept);
 			clear.setDelayedEnqueueOffset(jailClearDelay.get());
 			context.enqueue(clear);
 		}
 		else {
 			log.info("Automark disabled, skipping");
+		}
+	}
+
+	@HandleEvents
+	public void clearMarks(EventContext context, JailAutoMarkClear event) {
+		if (event == pendingClear) {
+			pendingClear = null;
+			pendingMarks.clear();
+			context.accept(new ClearAutoMarkRequest());
+		}
+	}
+
+	@HandleEvents
+	public void otherMarks(EventContext context, AutoMarkRequest event) {
+		if (!pendingMarks.remove(event)) {
+			pendingClear = null;
+		}
+	}
+
+	@HandleEvents
+	public void otherMarks(EventContext context, SpecificAutoMarkRequest event) {
+		if (event.getMarker() != MarkerSign.CLEAR) {
+			pendingClear = null;
+		}
+	}
+
+	@HandleEvents
+	public void otherClear(EventContext context, ClearAutoMarkRequest event) {
+		pendingClear = null;
+	}
+
+	@HandleEvents
+	public void otherMarks(EventContext context, AutoMarkSlotRequest event) {
+		for (Event parent = event.getParent(); parent != null; parent = parent.getParent()) {
+			if (parent == pendingOwner) {
+				return;
+			}
+		}
+		pendingClear = null;
+	}
+
+	@HandleEvents
+	public void otherMarks(EventContext context, SpecificAutoMarkSlotRequest event) {
+		if (event.getMarker() != MarkerSign.CLEAR) {
+			pendingClear = null;
 		}
 	}
 

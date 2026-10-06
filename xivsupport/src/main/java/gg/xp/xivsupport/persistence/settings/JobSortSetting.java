@@ -100,6 +100,10 @@ public class JobSortSetting {
 		return Collections.unmodifiableList(jobSort);
 	}
 
+	public List<Job> getDefaultJobOrder() {
+		return allValidJobs.stream().sorted(getDefaultSort()).toList();
+	}
+
 	/**
 	 * Deprecated, use {@link #getJobOrder()}
 	 *

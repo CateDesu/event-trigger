@@ -6,6 +6,8 @@ import gg.xp.xivsupport.callouts.ModifiableCallout;
 import gg.xp.xivsupport.events.actlines.events.AbilityCastStart;
 import gg.xp.xivsupport.events.actlines.events.HasDuration;
 import gg.xp.xivsupport.events.actlines.events.WipeEvent;
+import gg.xp.xivsupport.events.actlines.events.ZoneChangeEvent;
+import gg.xp.xivsupport.events.actlines.events.actorcontrol.DutyCommenceEvent;
 import gg.xp.xivsupport.events.misc.pulls.PullStartedEvent;
 import org.apache.commons.lang3.function.TriConsumer;
 import org.apache.commons.lang3.mutable.MutableInt;
@@ -198,7 +200,8 @@ public final class SqtTemplates {
 
 		@Override
 		public void feed(EventContext ctx, BaseEvent event) {
-			if (event instanceof WipeEvent || event instanceof PullStartedEvent) {
+			if (event instanceof WipeEvent || event instanceof PullStartedEvent
+					|| event instanceof ZoneChangeEvent || event instanceof DutyCommenceEvent) {
 				reset();
 			}
 			super.feed(ctx, event);

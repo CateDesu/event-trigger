@@ -1,6 +1,7 @@
 package gg.xp.xivsupport.events.triggers.duties.ewult;
 
 import gg.xp.reevent.events.BaseEvent;
+import gg.xp.reevent.events.Event;
 import gg.xp.reevent.events.EventContext;
 import gg.xp.reevent.scan.AutoChildEventHandler;
 import gg.xp.reevent.scan.AutoFeed;
@@ -36,7 +37,10 @@ import gg.xp.xivsupport.events.triggers.marks.ClearAutoMarkRequest;
 import gg.xp.xivsupport.events.triggers.marks.adv.MarkerSign;
 import gg.xp.xivsupport.events.triggers.marks.adv.MultiSlotAutoMarkHandler;
 import gg.xp.xivsupport.events.triggers.marks.adv.SpecificAutoMarkRequest;
+import gg.xp.xivsupport.events.triggers.marks.adv.AutoMarkServiceSelector;
 import gg.xp.xivsupport.events.triggers.seq.SequentialTrigger;
+import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerConcurrencyMode;
+import gg.xp.xivsupport.events.triggers.seq.SequentialTriggerController;
 import gg.xp.xivsupport.events.triggers.seq.SqtTemplates;
 import gg.xp.xivsupport.events.triggers.support.NpcCastCallout;
 import gg.xp.xivsupport.events.triggers.support.PlayerStatusCallout;
@@ -66,10 +70,15 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -243,6 +252,15 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	private final IntSetting omegaFirstSetDelay;
 	private final IntSetting omegaSecondSetDelay;
 
+	private final AtomicLong markerGeneration = new AtomicLong();
+	private final Map<Event, Long> assignmentGenerations = Collections.synchronizedMap(new WeakHashMap<>());
+
+	public OmegaUltimate(XivState state, StatusEffectRepository buffs, ActiveCastRepository casts, PersistenceProvider pers,
+	                     AutoMarkServiceSelector selector) {
+		this(state, buffs, casts, pers);
+		selector.addListener(this::resetAutomarks);
+	}
+
 	public OmegaUltimate(XivState state, StatusEffectRepository buffs, ActiveCastRepository casts, PersistenceProvider pers) {
 		this.state = state;
 		this.buffs = buffs;
@@ -351,6 +369,35 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 		omegaPsPrio = new JobSortOverrideSetting(pers, settingKeyBase + "omega-ps-prio-override", state, groupPrioJobSort);
 		omegaFirstSetDelay = new IntSetting(pers, settingKeyBase + "omega-am-1-delay-seconds", 1, 0, 28);
 		omegaSecondSetDelay = new IntSetting(pers, settingKeyBase + "omega-am-2-delay-seconds", 0, 0, 20);
+		List.of(looperAM, pantoAmEnable, sniperAmEnable, psAmEnable, monitorAmEnable,
+				deltaAmEnable, sigmaAmEnable, omegaAmEnable, omegaAmFirstSetEnable, omegaAmSecondSetEnable)
+				.forEach(setting -> setting.addListener(this::resetAutomarks));
+	}
+
+	private void resetAutomarks() {
+		markerGeneration.incrementAndGet();
+		List.of(programLoopAM, pantoAm, psMarkerAm, sigmaAM, omegaFirstSetAm, omegaSecondSetAm)
+				.forEach(SequentialTrigger::stopSilently);
+		amActive = false;
+	}
+
+	private Consumer<Event> automarkOutput(Consumer<Event> output) {
+		long generation = markerGeneration.get();
+		return event -> {
+			if (markerGeneration.get() == generation) {
+				output.accept(event);
+			}
+		};
+	}
+
+	private void publishAssignment(Event assignment, long generation, Consumer<Event> output) {
+		assignmentGenerations.put(assignment, generation);
+		output.accept(assignment);
+	}
+
+	private boolean currentMarkerAssignment(Event assignment) {
+		Long generation = assignmentGenerations.get(assignment);
+		return generation == null || generation == markerGeneration.get();
 	}
 
 	@Override
@@ -458,15 +505,20 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 
 	private Map<TwoGroupsOfFour, XivPlayerCharacter> getLineGroups() {
 		Map<NumberInLine, List<XivPlayerCharacter>> groups = new EnumMap<>(NumberInLine.class);
+		Set<XivPlayerCharacter> party = new HashSet<>(state.getPartyList());
 		buffs.getBuffs().forEach(item -> {
 			NumberInLine num = NumberInLine.debuffToLine(item);
-			if (num != null && num != NumberInLine.UNKNOWN) {
+			if (num != null && num != NumberInLine.UNKNOWN && !item.wouldBeExpired()) {
 				XivCombatant target = item.getTarget();
-				if (target instanceof XivPlayerCharacter xpc) {
+				if (target instanceof XivPlayerCharacter xpc && party.contains(xpc)) {
 					groups.computeIfAbsent(num, unused -> new ArrayList<>()).add(xpc);
 				}
 			}
 		});
+		if (groups.size() != 4 || groups.values().stream().anyMatch(group -> group.size() != 2)
+				|| groups.values().stream().flatMap(List::stream).distinct().count() != 8) {
+			return Map.of();
+		}
 		Map<TwoGroupsOfFour, XivPlayerCharacter> finalMap = new EnumMap<>(TwoGroupsOfFour.class);
 		groups.forEach((k, v) -> {
 			v.sort(p1prio.getComparator());
@@ -476,15 +528,24 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 		return finalMap;
 	}
 
+	private Map<TwoGroupsOfFour, XivPlayerCharacter> waitForLineGroups(SequentialTriggerController<BaseEvent> s) {
+		Map<TwoGroupsOfFour, XivPlayerCharacter> groups;
+		while ((groups = getLineGroups()).isEmpty()) {
+			s.waitEvent(BaseEvent.class);
+		}
+		return groups;
+	}
+
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> programLoopGather = SqtTemplates.sq(50_000, AbilityCastStart.class,
 			acs -> acs.abilityIdMatches(0x7B03),
 			(e1, s) -> {
+				long generation = markerGeneration.get();
 				log.info("Program Loop: Start");
-				s.waitEvents(8, BuffApplied.class, OmegaUltimate::isLineDebuff);
+				Map<TwoGroupsOfFour, XivPlayerCharacter> groups = waitForLineGroups(s);
 				s.waitMs(50);
-				s.accept(new ProgramLoopAssignments(getLineGroups()));
-			});
+				publishAssignment(new ProgramLoopAssignments(groups), generation, s::accept);
+			}).setConcurrency(SequentialTriggerConcurrencyMode.REPLACE_OLD);
 
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> programLoopExecute = SqtTemplates.sq(50_000, ProgramLoopAssignments.class, unused -> true,
@@ -566,7 +627,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	}
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> programLoopAM = SqtTemplates.sq(50_000, ProgramLoopAssignments.class, unused -> true,
+	private final SequentialTrigger<BaseEvent> programLoopAM = SqtTemplates.sq(50_000, ProgramLoopAssignments.class, this::currentMarkerAssignment,
 			(e1, s) -> {
 
 				if (isLooperAmEnabled()) {
@@ -579,7 +640,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 					s.waitMs(35_000);
 					s.accept(new ClearAutoMarkRequest());
 				}
-			});
+			}).setConcurrency(SequentialTriggerConcurrencyMode.REPLACE_OLD);
 
 	// TODO: make this centralized somewhere
 	private volatile boolean amActive;
@@ -607,11 +668,12 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	private final SequentialTrigger<BaseEvent> pantokratorSq = SqtTemplates.sq(50_000, AbilityCastStart.class,
 			acs -> acs.abilityIdMatches(0x7B0B),
 			(e1, s) -> {
+				long generation = markerGeneration.get();
 				log.info("Program Loop: Start");
-				s.waitEvents(8, BuffApplied.class, OmegaUltimate::isLineDebuff);
+				Map<TwoGroupsOfFour, XivPlayerCharacter> groups = waitForLineGroups(s);
 				s.waitMs(50);
-				PantoAssignments assignments = new PantoAssignments(getLineGroups());
-				s.accept(assignments);
+				PantoAssignments assignments = new PantoAssignments(groups);
+				publishAssignment(assignments, generation, s::accept);
 				BuffApplied myLineBuff = getBuffs().findStatusOnTarget(getState().getPlayer(), OmegaUltimate::isLineDebuff);
 				NumberInLine number = NumberInLine.debuffToLine(myLineBuff);
 				s.waitMs(100);
@@ -705,7 +767,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	}
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> pantoAm = SqtTemplates.sq(50_000, PantoAssignments.class, unused -> true,
+	private final SequentialTrigger<BaseEvent> pantoAm = SqtTemplates.sq(50_000, PantoAssignments.class, this::currentMarkerAssignment,
 			(e1, s) -> {
 				if (isPantoAmEnabled()) {
 					e1.getAssignments().forEach((assignment, player) -> {
@@ -722,6 +784,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> psCollectorSq = SqtTemplates.sq(40_000, AbilityCastStart.class, acs -> acs.abilityIdMatches(0x7B3F),
 			(e1, s) -> {
+				long generation = markerGeneration.get();
 				Map<PsMarkerGroup, XivPlayerCharacter> headmarkers = new EnumMap<>(PsMarkerGroup.class);
 				// We now have a mapping from the headmarker offset to the players with that ID
 				s.waitEventsQuickSuccession(8, HeadMarkerEvent.class, hm -> hm.getTarget().isPc(), Duration.ofSeconds(1))
@@ -757,11 +820,11 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 						});
 				log.info("Headmarkers map: {}", headmarkers);
 				boolean mid = getBuffs().getBuffs().stream().filter(ba -> ba.buffIdMatches(0xD63, 0xD64)).findFirst().map(ba -> ba.buffIdMatches(0xD63)).stream().findFirst().orElse(false);
-				s.accept(new PsMarkerAssignments(headmarkers, mid));
+				publishAssignment(new PsMarkerAssignments(headmarkers, mid), generation, s::accept);
 			});
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> psMarkerAm = SqtTemplates.sq(50_000, PsMarkerAssignments.class, e -> true,
+	private final SequentialTrigger<BaseEvent> psMarkerAm = SqtTemplates.sq(50_000, PsMarkerAssignments.class, this::currentMarkerAssignment,
 			(e1, s) -> {
 				if (!getPsAmEnable().get()) {
 					return;
@@ -964,8 +1027,9 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	private final SequentialTrigger<BaseEvent> sniperCannonSq = SqtTemplates.sq(30_000,
 			BuffApplied.class, ba -> ba.buffIdMatches(0xD61),
 			(e1, s) -> {
+				Consumer<Event> marks = automarkOutput(s::accept);
 				if (getSniperAmEnable().get()) {
-					s.accept(new ClearAutoMarkRequest());
+					marks.accept(new ClearAutoMarkRequest());
 				}
 				s.waitMs(100);
 				// The buffs have already gone out, there just wasn't a good pre-tell in the log
@@ -1033,7 +1097,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 				}
 				if (getSniperAmEnable().get()) {
 					s.waitMs(300);
-					MultiSlotAutoMarkHandler<WrothStyleAssignment> handler = new MultiSlotAutoMarkHandler<>(s::accept, getSniperAmSettings());
+					MultiSlotAutoMarkHandler<WrothStyleAssignment> handler = new MultiSlotAutoMarkHandler<>(marks, getSniperAmSettings());
 					handler.processRange(sniperPlayers, WrothStyleAssignment.SPREAD_1, WrothStyleAssignment.SPREAD_4);
 					handler.processRange(hpSniperPlayers, WrothStyleAssignment.STACK_1, WrothStyleAssignment.STACK_2);
 					handler.processRange(nothingPlayers, WrothStyleAssignment.NOTHING_1, WrothStyleAssignment.NOTHING_2);
@@ -1048,7 +1112,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 				AbilityUsedEvent ring2 = s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0x7B51) && aue.isFirstTarget());
 				s.updateCall(waveRepeaterMoveIn2, ring2);
 				if (getSniperAmEnable().get()) {
-					s.accept(new ClearAutoMarkRequest());
+					marks.accept(new ClearAutoMarkRequest());
 				}
 			});
 
@@ -1239,6 +1303,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	private final SequentialTrigger<BaseEvent> monitorsSq = SqtTemplates.sq(30_000,
 			AbilityCastStart.class, acs -> acs.abilityIdMatches(0x7B6B, 0x7B6C),
 			(e1, s) -> {
+				Consumer<Event> marks = automarkOutput(s::accept);
 				List<BuffApplied> buffs = getBuffs().getBuffs().stream()
 						// D7C is right monitor, D7D is left monitor
 						.filter(ba -> ba.buffIdMatches(0xD7C, 0xD7D))
@@ -1267,16 +1332,16 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 								() -> s.updateCall(noMonitorOnYou, buffs.get(0)));
 				// TODO: proper AM settings
 				if (getMonitorAmEnable().get()) {
-					s.accept(new ClearAutoMarkRequest());
+					marks.accept(new ClearAutoMarkRequest());
 					s.waitMs(1000);
 					for (XivPlayerCharacter mp : monitorPlayers) {
-						s.accept(new SpecificAutoMarkRequest(mp, MarkerSign.BIND_NEXT));
+						marks.accept(new SpecificAutoMarkRequest(mp, MarkerSign.BIND_NEXT));
 					}
 					for (XivPlayerCharacter nmp : nonMonitorPlayers) {
-						s.accept(new SpecificAutoMarkRequest(nmp, MarkerSign.ATTACK_NEXT));
+						marks.accept(new SpecificAutoMarkRequest(nmp, MarkerSign.ATTACK_NEXT));
 					}
 					s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0x7B6B, 0x7B6C));
-					s.accept(new ClearAutoMarkRequest());
+					marks.accept(new ClearAutoMarkRequest());
 				}
 			});
 
@@ -1402,6 +1467,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> runDynamisDeltaSq = SqtTemplates.sq(120_000, AbilityCastStart.class, acs -> acs.abilityIdMatches(0x7B88),
 			(e1, s) -> {
+				Consumer<Event> marks = automarkOutput(s::accept);
 				log.info("Dynamis Delta: Start");
 				s.updateCall(runDynamisDelta, e1);
 				List<TetherEvent> tethers = s.waitEventsQuickSuccession(4, TetherEvent.class, te -> te.tetherIdMatches(200, 201), Duration.ofMillis(300));
@@ -1428,7 +1494,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 				else {
 					s.updateCall(runDynamisDeltaLocal, myTether);
 				}
-				MultiSlotAutoMarkHandler<DynamisDeltaAssignment> handler = new MultiSlotAutoMarkHandler<>(s::accept, getDeltaAmSettings());
+				MultiSlotAutoMarkHandler<DynamisDeltaAssignment> handler = new MultiSlotAutoMarkHandler<>(marks, getDeltaAmSettings());
 				if (getDeltaAmEnable().get()) {
 					XivPlayerCharacter nearPlayer = (XivPlayerCharacter) helloNearWorld.getTarget();
 					XivPlayerCharacter distPlayer = (XivPlayerCharacter) helloDistantWorld.getTarget();
@@ -1535,6 +1601,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> runDynamisSigmaSq = SqtTemplates.sq(120_000, AbilityCastStart.class, acs -> acs.abilityIdMatches(0x8014),
 			(e1, s) -> {
+				long generation = markerGeneration.get();
 				s.updateCall(runDynamisSigma, e1);
 				if (getSigmaAmEnable().get()) {
 					s.accept(new ClearAutoMarkRequest());
@@ -1611,7 +1678,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 					// One stack first, then zero stack (returns -1)
 					party.sort(Comparator.comparing(xpc -> -getBuffs().buffStacksOnTarget(xpc, 0xD74)));
 
-					s.accept(new SigmaAssignments(Map.of(
+					publishAssignment(new SigmaAssignments(Map.of(
 							DynamisSigmaAssignment.NearWorld, near,
 							DynamisSigmaAssignment.DistantWorld, dist,
 							DynamisSigmaAssignment.OneStack1, party.get(0),
@@ -1620,7 +1687,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 							DynamisSigmaAssignment.OneStack4, party.get(3),
 							DynamisSigmaAssignment.Remaining1, party.get(4),
 							DynamisSigmaAssignment.Remaining2, party.get(5)
-					)));
+					)), generation, s::accept);
 				}
 				catch (Throwable t) {
 					log.error("Error calculating sigma assignments!", t);
@@ -1714,7 +1781,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 			});
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> sigmaAM = SqtTemplates.sq(60_000, SigmaAssignments.class, sa -> true,
+	private final SequentialTrigger<BaseEvent> sigmaAM = SqtTemplates.sq(60_000, SigmaAssignments.class, this::currentMarkerAssignment,
 			(e1, s) -> {
 				if (getSigmaAmEnable().get()) {
 					MultiSlotAutoMarkHandler<DynamisSigmaAssignment> handler = new MultiSlotAutoMarkHandler<>(s::accept, getSigmaAmSettings());
@@ -1818,9 +1885,11 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> runDynamisOmegaSq = SqtTemplates.sq(120_000, AbilityCastStart.class, acs -> acs.abilityIdMatches(0x8015),
 			(e1, s) -> {
+				long generation = markerGeneration.get();
+				Consumer<Event> marks = automarkOutput(s::accept);
 				s.updateCall(runDynamisOmega, e1);
 				if (getOmegaAmEnable().get()) {
-					s.accept(new ClearAutoMarkRequest());
+					marks.accept(new ClearAutoMarkRequest());
 				}
 				log.info("Dynamis Omega: Start");
 				/*
@@ -1842,7 +1911,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 				s.waitEvents(2, BuffApplied.class, ba -> ba.buffIdMatches(0xBBD));
 				// call this T+0
 				s.waitMs(100);
-				MultiSlotAutoMarkHandler<DynamisOmegaAssignment> handler = new MultiSlotAutoMarkHandler<>(s::accept, getOmegaAmSettings());
+				MultiSlotAutoMarkHandler<DynamisOmegaAssignment> handler = new MultiSlotAutoMarkHandler<>(marks, getOmegaAmSettings());
 				BuffApplied shortNear = getBuffs().findBuff(ba -> ba.buffIdMatches(0xD72) && ba.getInitialDuration().toSeconds() < 40);
 				BuffApplied shortDist = getBuffs().findBuff(ba -> ba.buffIdMatches(0xD73) && ba.getInitialDuration().toSeconds() < 40);
 				BuffApplied longNear = getBuffs().findBuff(ba -> ba.buffIdMatches(0xD72) && ba.getInitialDuration().toSeconds() > 40);
@@ -1888,12 +1957,12 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 					leftovers.remove(shortNear.getTarget());
 					leftovers.remove(shortDist.getTarget());
 					leftovers.removeAll(playersToMark);
-					s.accept(new OmegaFirstSetAssignments(
+					publishAssignment(new OmegaFirstSetAssignments(
 							(XivPlayerCharacter) shortNear.getTarget(),
 							(XivPlayerCharacter) shortDist.getTarget(),
 							playersToMark,
 							leftovers
-					));
+					), generation, s::accept);
 				}
 				AbilityCastStart diffuseWaveCannon = s.waitEvent(AbilityCastStart.class, acs -> acs.abilityIdMatches(31643, 31644));
 				AbilityCastStart oversampledWaveCannon = s.waitEvent(AbilityCastStart.class, acs -> acs.abilityIdMatches(31638, 31639));
@@ -1960,12 +2029,12 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 								                  && !getBuffs().isStatusOnTarget(member, 0xBBD))
 								.limit(2)
 								.toList();
-						s.accept(new OmegaSecondSetAssignments(
+						publishAssignment(new OmegaSecondSetAssignments(
 								(XivPlayerCharacter) longNear.getTarget(),
 								(XivPlayerCharacter) longDist.getTarget(),
 								twoStackPlayers,
 								threeStackPlayers
-						));
+						), generation, s::accept);
 					}
 				}
 				s.waitMs(15_000);
@@ -1973,7 +2042,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 			});
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> omegaFirstSetAm = SqtTemplates.sq(60_000, OmegaFirstSetAssignments.class, sa -> true,
+	private final SequentialTrigger<BaseEvent> omegaFirstSetAm = SqtTemplates.sq(60_000, OmegaFirstSetAssignments.class, this::currentMarkerAssignment,
 			(e1, s) -> {
 				if (getOmegaAmEnable().get() && getOmegaAmFirstSetEnable().get()) {
 					MultiSlotAutoMarkHandler<DynamisOmegaAssignment> handler = new MultiSlotAutoMarkHandler<>(s::accept, getOmegaAmSettings());
@@ -1993,7 +2062,7 @@ public class OmegaUltimate extends AutoChildEventHandler implements FilteredEven
 			});
 
 	@AutoFeed
-	private final SequentialTrigger<BaseEvent> omegaSecondSetAm = SqtTemplates.sq(60_000, OmegaSecondSetAssignments.class, sa -> true,
+	private final SequentialTrigger<BaseEvent> omegaSecondSetAm = SqtTemplates.sq(60_000, OmegaSecondSetAssignments.class, this::currentMarkerAssignment,
 			(e1, s) -> {
 				if (getOmegaAmEnable().get() && getOmegaAmSecondSetEnable().get()) {
 					MultiSlotAutoMarkHandler<DynamisOmegaAssignment> handler = new MultiSlotAutoMarkHandler<>(s::accept, getOmegaAmSettings());
