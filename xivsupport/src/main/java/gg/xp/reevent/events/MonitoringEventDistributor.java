@@ -27,34 +27,34 @@ import java.util.Map;
 public class MonitoringEventDistributor extends BasicEventDistributor implements TopologyProvider {
 	private static final Logger log = LoggerFactory.getLogger(MonitoringEventDistributor.class);
 	private final AutoScan scanner;
-	private final Object loadLock = new Object();
 	private final TopologyInfo topoInfo;
 	private final Map<Class<? extends Event>, List<EventHandler<Event>>> eventClassMap = new HashMap<>();
 	private final List<@NotNull EventHandler<Event>> autoHandlers = new ArrayList<>();
 	private final List<@NotNull EventHandler<Event>> manualHandlers = new ArrayList<>();
 	private volatile boolean dirty;
-	private Topology topology;
+	private volatile Topology topology;
 
 	public MonitoringEventDistributor(StateStore state, AutoScan scanner, TopologyInfo topoInfo, CompMonitor mon, AutoHandlerConfig config) {
 		super(state);
 		mon.addAndRunListener(item -> {
-			boolean dirty = false;
+			List<EventHandler<Event>> added = new ArrayList<>();
 			Object inst = item.instance();
 			if (inst instanceof EventHandler<?> eh) {
-				autoHandlers.add((EventHandler<Event>) eh);
-				dirty = true;
+				added.add((EventHandler<Event>) eh);
 			}
 			Class<?> clazz = inst.getClass();
 			Method[] methods = clazz.getMethods();
 			for (Method method : methods) {
 				if (method.isAnnotationPresent(HandleEvents.class)) {
 					AutoHandler rawEvh = new AutoHandler(clazz, method, inst, config);
-					autoHandlers.add(rawEvh);
-					dirty = true;
+					added.add(rawEvh);
 				}
 			}
-			if (dirty) {
-				this.dirty = true;
+			if (!added.isEmpty()) {
+				synchronized (handlersLock) {
+					autoHandlers.addAll(added);
+					dirty = true;
+				}
 			}
 		});
 		this.scanner = scanner;
@@ -63,18 +63,20 @@ public class MonitoringEventDistributor extends BasicEventDistributor implements
 	}
 
 	@Override
-	public synchronized void registerHandler(EventHandler<Event> handler) {
+	public void registerHandler(EventHandler<Event> handler) {
 		if (handler == null) {
 			throw new IllegalArgumentException("Handler was null!");
 		}
-		manualHandlers.add(handler);
-		dirty = true;
+		synchronized (handlersLock) {
+			manualHandlers.add(handler);
+			dirty = true;
+		}
 	}
 
 	public void reloadIfNeeded(Event event) {
 		scanner.doScanIfNeeded();
 		if (dirty) {
-			synchronized (loadLock) {
+			synchronized (handlersLock) {
 				if (dirty) {
 					log.info("Reloading due to {}", event);
 					handlers.clear();

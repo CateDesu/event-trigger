@@ -23,7 +23,7 @@ public class BasicEventDistributor implements EventDistributor {
 	private static final int MAX_EVENTS_PER_NATURAL_EVENT = 3000;
 
 	protected final List<EventHandler<Event>> handlers = new ArrayList<>();
-	private final Object handlersLock = new Object();
+	protected final Object handlersLock = new Object();
 
 	private final Map<EventHandler<?>, LongSummaryStatistics> executionTimes = new HashMap<>();
 	private boolean enableProfiling;

@@ -66,7 +66,7 @@ public class DmuRegressionTest {
 		final AtomicReference<Instant> clock = new AtomicReference<>(Instant.now());
 		final StatusEffectRepository buffs = new StatusEffectRepository(null, null);
 		final DMU pack;
-		SequentialTrigger<BaseEvent> sequence;
+		final List<SequentialTrigger<BaseEvent>> sequences = new ArrayList<>();
 
 		Harness() {
 			XivState state = (XivState) Proxy.newProxyInstance(XivState.class.getClassLoader(),
@@ -82,10 +82,13 @@ public class DmuRegressionTest {
 		}
 
 		@SuppressWarnings("unchecked")
-		void select(String name) throws Exception {
-			Field field = DMU.class.getDeclaredField(name);
-			field.setAccessible(true);
-			sequence = (SequentialTrigger<BaseEvent>) field.get(pack);
+		void select(String... names) throws Exception {
+			sequences.clear();
+			for (String name : names) {
+				Field field = DMU.class.getDeclaredField(name);
+				field.setAccessible(true);
+				sequences.add((SequentialTrigger<BaseEvent>) field.get(pack));
+			}
 		}
 
 		void feed(BaseEvent event) {
@@ -94,7 +97,7 @@ public class DmuRegressionTest {
 			if (event instanceof BuffApplied applied) { buffs.buffApplication(context, applied); }
 			if (event instanceof BuffRemoved removed) { buffs.buffRemove(context, removed); }
 			if (event instanceof StatusLoopVfxApplied vfx) { pack.handleVfx(vfx); }
-			if (sequence != null) { sequence.feed(context, event); }
+			sequences.forEach(sequence -> sequence.feed(context, event));
 			pack.maintainKefkaMarks(context, event);
 		}
 
@@ -128,7 +131,7 @@ public class DmuRegressionTest {
 		}
 
 		@Override public void close() {
-			if (sequence != null) { sequence.stopSilently(); }
+			sequences.forEach(SequentialTrigger::stopSilently);
 			Assert.assertTrue(context.events.stream().noneMatch(SequentialTriggerFailedEvent.class::isInstance),
 					"No chain should fail while handling incomplete data");
 		}
@@ -185,7 +188,7 @@ public class DmuRegressionTest {
 		try (Harness h = new Harness()) {
 			h.select("gravenImageSq");
 			h.cast(0xBCF2);
-			h.sequence.forceExpire();
+			h.sequences.forEach(SequentialTrigger::forceExpire);
 			h.cast(0xBCF2);
 			h.tethers(known ? Position.of2d(125, 100) : null);
 			h.feed(new HeadMarkerEvent(BOSS, 675));
@@ -205,7 +208,7 @@ public class DmuRegressionTest {
 	@Test
 	public void missingGazeKeepsTheElementCall() throws Exception {
 		try (Harness h = new Harness()) {
-			h.select("ttSq");
+			h.select("ttSq", "ttTetherSq", "ttGazeSq");
 			h.cast(0xBAB9);
 			h.buff(0x130C, 7, 0);
 			BuffApplied second = h.buff(0x13D9, 10, 0);
@@ -287,6 +290,7 @@ public class DmuRegressionTest {
 				h.buff(0x15A5, 60, i);
 				h.buff(0x566, 60, i);
 			}
+			h.tick(1);
 			h.feed(new StatusLoopVfxApplied(exdeath,
 					new BuffApplied(new XivStatusEffect(0), 90, BOSS, exdeath, 1122)));
 			AbilityCastStart cast = new AbilityCastStart(new XivAbility(0xC395), BOSS, player(0), 5);

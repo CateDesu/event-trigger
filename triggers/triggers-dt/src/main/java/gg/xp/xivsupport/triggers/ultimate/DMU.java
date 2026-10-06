@@ -184,7 +184,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> gravenImageSq = SqtTemplates.sq(120_000,
-			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBCF2) && !this.ttSq.isActive(),
+			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBCF2) && !this.ttGazeSq.isActive(),
 			(e1, s) -> {
 				s.updateCall(gravenImage, e1);
 				List<BuffApplied> confettis = buffs.findBuffsById(0x13D6);
@@ -229,59 +229,52 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 			s.updateCall(graven1NoTether);
 		}
 
-		// These two presumably indicate mechanics
-		/*
-		Example 1: 4:09PM fake ice, spread
-			2 double fake
-
-		Example 2: 4:32 fake fake (stack) 675 and 673 on boss, 127 on all players
-				Fake ice (BA9E, BA9B), mystery magic BA94
-				4s hit with fire BAA3
-		2 all real 676 and 678, thunder ba9f, blizzard ba 98
-
-		4:38PM all fake (stand in both and stack) fake spread
-			675, 673, 8x 127
-		second set 676 678
-
-
-		fake ice + real spread
-
-		fake lightning
-
-		based on this:
-		673 0x2A1 fake fire spread (should actually stack)
-		674 0x2A2 real fire spread (should really spread)
-		675 0x2A3 fake ice cleave (go in cones)
-		676 0x2A4 real ice cleave (avoid cones)
-		677 0x2A5 fake thunder (go in the lines)
-		678 0x2A6 real thunder (avoid lines)
-		 */
-
-		// 4:59PM wrong call - should have been spread
-		// 5:13PM ice was right but not stack/spread - players had a stack marker, so it was fake stack i.e. spread
-		// so we do need the player HM after all
-		// stack is HM 128, spread is 127
+		// The player marker ends the first element set.
+		var firstElement = earlyMarkers.isEmpty()
+				? s.waitEvent(HeadMarkerEvent.class, hm -> hm.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE, FIRE_SPREAD, FIRE_STACK))
+				: earlyMarkers.get(0);
 
 		{
 			List<HeadMarkerEvent> kefkaHM = new ArrayList<>(earlyMarkers);
-			kefkaHM.addAll(s.waitEvents(2 - kefkaHM.size(), HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE)));
-			var playerHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(127, 128));
-			boolean fakeFire = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(673));
-			boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));
-			boolean presentSpread = playerHm.markerIdMatches(127);
-			boolean actuallySpread = presentSpread != fakeFire;
-			s.setParam("fakeFire", fakeFire);
-			s.setParam("fakeIce", fakeIce);
-			var hm1 = kefkaHM.get(0);
-			if (actuallySpread) {
-				s.updateCall(fakeIce ? gravenFakeIceSpread : gravenRealIceSpread, hm1);
+			if (earlyMarkers.isEmpty() && !firstElement.markerIdMatches(FIRE_SPREAD, FIRE_STACK)) {
+				kefkaHM.add(firstElement);
+			}
+			HeadMarkerEvent playerHm = firstElement.markerIdMatches(FIRE_SPREAD, FIRE_STACK) ? firstElement : null;
+			while (playerHm == null) {
+				var marker = s.waitEventUntil(HeadMarkerEvent.class,
+						hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_ICE, REAL_ICE, FIRE_SPREAD, FIRE_STACK),
+						BaseEvent.class, unused -> firstElement.getEffectiveTimeSince().toMillis() > 200);
+				if (marker == null) {
+					break;
+				}
+				if (marker.markerIdMatches(FIRE_SPREAD, FIRE_STACK)) {
+					playerHm = marker;
+					break;
+				}
+				kefkaHM.add(marker);
+			}
+			var fire = kefkaHM.stream().filter(hm -> hm.markerIdMatches(FAKE_FIRE, REAL_FIRE)).findFirst().orElse(null);
+			var ice = kefkaHM.stream().filter(hm -> hm.markerIdMatches(FAKE_ICE, REAL_ICE)).findFirst().orElse(null);
+			if (fire != null && ice != null && playerHm != null) {
+				boolean fakeFire = fire.markerIdMatches(FAKE_FIRE);
+				boolean fakeIce = ice.markerIdMatches(FAKE_ICE);
+				boolean actuallySpread = playerHm.markerIdMatches(FIRE_SPREAD) != fakeFire;
+				s.setParam("fakeFire", fakeFire);
+				s.setParam("fakeIce", fakeIce);
+				var hm1 = kefkaHM.get(0);
+				if (actuallySpread) {
+					s.updateCall(fakeIce ? gravenFakeIceSpread : gravenRealIceSpread, hm1);
+				}
+				else {
+					s.updateCall(fakeIce ? gravenFakeIceStack : gravenRealIceStack, hm1);
+				}
 			}
 			else {
-				s.updateCall(fakeIce ? gravenFakeIceStack : gravenRealIceStack, hm1);
+				log.warn("Graven first element set incomplete: {}", kefkaHM);
 			}
 		}
 
-		s.waitMs(6_000);
+		s.waitMs(Math.max(0, 6_000 - firstElement.getEffectiveTimeSince().toMillis()));
 		s.updateCall(gravenSpreadForLaser);
 		List<AbilityUsedEvent> laserTargets = s.waitEventsQuickSuccession(4,
 				AbilityUsedEvent.class,
@@ -305,12 +298,25 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 		}
 
 		{
-			List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER));
-			boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(677));
-			boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(675));
+			var hm1 = s.waitEventUntil(HeadMarkerEvent.class,
+					hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER),
+					BaseEvent.class, unused -> confettis.stream().allMatch(BuffApplied::wouldBeExpired));
+			if (hm1 == null) {
+				log.warn("Graven second element set missing");
+				return;
+			}
+			var hm2 = s.waitEventUntil(HeadMarkerEvent.class,
+					hme -> hme.markerIdMatches(FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER)
+							&& iceMarker(hme) != iceMarker(hm1),
+					BaseEvent.class, unused -> hm1.getEffectiveTimeSince().toMillis() > 200);
+			if (hm2 == null) {
+				log.warn("Graven second element set incomplete: {}", hm1);
+				return;
+			}
+			boolean fakeThunder = hm1.markerIdMatches(FAKE_THUNDER) || hm2.markerIdMatches(FAKE_THUNDER);
+			boolean fakeIce = hm1.markerIdMatches(FAKE_ICE) || hm2.markerIdMatches(FAKE_ICE);
 			s.setParam("fakeThunder", fakeThunder);
 			s.setParam("fakeIce", fakeIce);
-			var hm1 = kefkaHM.get(0);
 			if (fakeThunder) {
 				s.updateCall(fakeIce ? gravenFakeIceFakeThunder : gravenRealIceFakeThunder, hm1);
 			}
@@ -476,13 +482,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBAB9),
 			(e1, s) -> {
 				s.updateCall(ttInitial, e1);
-				// NyaaTriggers: the two waits used to split on a hard 8.5s boundary,
-				// set 1 ~7s vs set 2 ~10s. On some pulls one side of the split never
-				// matched, the invocation then ran out its whole 180s budget, and every
-				// TT callout after "Arrows" silently vanished for the pull. Take the
-				// player's two arrow buffs in any order and sort by initial duration,
-				// shorter resolves first. A timeout now speaks ttError and logs what
-				// the engine actually saw, instead of dying quietly.
+				// Arrow duration jitter must not split the two applications into separate waits.
 				BuffApplied firstArrow;
 				BuffApplied secondArrow;
 				java.util.function.Predicate<BuffApplied> arrowBuff = ba -> ba.getTarget().isThePlayer()
@@ -558,6 +558,18 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					s.updateCall(call, shortBuff);
 				}
 				s.waitBuffRemoved(buffs, longBuff);
+			});
+
+	@AutoFeed
+	private final SequentialTrigger<BaseEvent> ttTetherSq = SqtTemplates.sq(50_000,
+			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBAB9),
+			(e1, s) -> {
+				BaseEvent transition = s.waitEvent(BaseEvent.class, event ->
+						event instanceof TetherEvent tether && tether.tetherIdMatches(45)
+						|| event instanceof BuffRemoved removed && removed.getTarget().isThePlayer()
+						&& removed.buffIdMatches(0x130C, 0x130D, 0x130E, 0x130F, 0x13D7, 0x13D8, 0x13D9, 0x13DA)
+						&& buffs.findBuff(ba -> ba.getTarget().isThePlayer()
+						&& ba.buffIdMatches(0x130C, 0x130D, 0x130E, 0x130F, 0x13D7, 0x13D8, 0x13D9, 0x13DA)) == null);
 
 				// TODO: sort this with self first
 				var confettis = buffs.findBuffsById(0x13D6);
@@ -572,7 +584,11 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 
 				Boolean playerStone;
 				{
-					var rawTethers = s.waitEventsQuickSuccession(8, TetherEvent.class, te -> te.tetherIdMatches(45));
+					List<TetherEvent> rawTethers = new ArrayList<>();
+					if (transition instanceof TetherEvent tether) {
+						rawTethers.add(tether);
+					}
+					rawTethers.addAll(s.waitEventsQuickSuccession(8 - rawTethers.size(), TetherEvent.class, te -> te.tetherIdMatches(45)));
 					s.waitThenRefreshCombatants(100);
 					var myTether = rawTethers.stream().filter(te -> te.eitherTargetMatches(XivCombatant::isThePlayer)).findAny().orElse(null);
 					playerStone = myTether == null ? null
@@ -586,30 +602,54 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					tetherCall.forceExpire();
 					s.updateCall(playerStone ? ttSleepTether : ttConfuseTether);
 				}
+			});
 
-				var lookMechanic = s.waitEvent(ActorControlExtraEvent.class, acee -> acee.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0));
-				s.waitThenRefreshCombatants(100);
-				var lookFrom = state.getLatestCombatantData(lookMechanic.getTarget());
-				Boolean fakeGaze = lookFrom.getPos() == null ? null : lookFrom.getPos().x() < 100;
-				s.setParam("fakeGaze", fakeGaze);
-				// This call is also in parallel
-				var gazeCall = fakeGaze == null ? null : s.call(fakeGaze ? ttEarlyFakeGaze : ttEarlyRealGaze, lookMechanic);
+	@AutoFeed
+	private final SequentialTrigger<BaseEvent> ttGazeSq = SqtTemplates.sq(50_000,
+			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xBAB9),
+			(e1, s) -> {
 
-				{
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_THUNDER, REAL_THUNDER));
-					var playerHm = s.waitEvent(HeadMarkerEvent.class, hme -> hme.markerIdMatches(FIRE_SPREAD, FIRE_STACK));
-					boolean fakeFire = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_FIRE));
-					boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_THUNDER));
-					boolean presentSpread = playerHm.markerIdMatches(FIRE_SPREAD);
-					boolean actuallySpread = presentSpread != fakeFire;
-					s.setParam("fakeFire", fakeFire);
-					s.setParam("fakeThunder", fakeThunder);
-					s.setParam("actualSpread", actuallySpread);
-					if (gazeCall != null) {
-						gazeCall.forceExpire();
-					}
-					s.updateCall(ttElementMechanic);
+				var first = s.waitEvent(BaseEvent.class, event ->
+						event instanceof ActorControlExtraEvent actor && actor.allFieldsMatch(0x19D, 0x40, 0x80, 0, 0)
+						|| event instanceof HeadMarkerEvent marker
+						&& marker.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_THUNDER, REAL_THUNDER, FIRE_SPREAD, FIRE_STACK));
+				Boolean fakeGaze = null;
+				RawModifiedCallout<ActorControlExtraEvent> gazeCall = null;
+				if (first instanceof ActorControlExtraEvent lookMechanic) {
+					s.waitThenRefreshCombatants(100);
+					var lookFrom = state.getLatestCombatantData(lookMechanic.getTarget());
+					fakeGaze = lookFrom.getPos() == null ? null : lookFrom.getPos().x() < 100;
+					gazeCall = fakeGaze == null ? null : s.call(fakeGaze ? ttEarlyFakeGaze : ttEarlyRealGaze, lookMechanic);
 				}
+				s.setParam("fakeGaze", fakeGaze);
+				HeadMarkerEvent fire = null;
+				HeadMarkerEvent thunder = null;
+				HeadMarkerEvent player = null;
+				HeadMarkerEvent pending = first instanceof HeadMarkerEvent marker ? marker : null;
+				while (fire == null || thunder == null || player == null) {
+					var marker = pending == null ? s.waitEvent(HeadMarkerEvent.class,
+							hm -> hm.markerIdMatches(FAKE_FIRE, REAL_FIRE, FAKE_THUNDER, REAL_THUNDER, FIRE_SPREAD, FIRE_STACK)) : pending;
+					pending = null;
+					if (marker.markerIdMatches(FAKE_FIRE, REAL_FIRE)) {
+						fire = marker;
+					}
+					else if (marker.markerIdMatches(FAKE_THUNDER, REAL_THUNDER)) {
+						thunder = marker;
+					}
+					else {
+						player = marker;
+					}
+				}
+				boolean fakeFire = fire.markerIdMatches(FAKE_FIRE);
+				boolean fakeThunder = thunder.markerIdMatches(FAKE_THUNDER);
+				boolean actuallySpread = player.markerIdMatches(FIRE_SPREAD) != fakeFire;
+				s.setParam("fakeFire", fakeFire);
+				s.setParam("fakeThunder", fakeThunder);
+				s.setParam("actualSpread", actuallySpread);
+				if (gazeCall != null) {
+					gazeCall.forceExpire();
+				}
+				s.updateCall(ttElementMechanic);
 
 				/*
 				Look towards/away:
@@ -2176,65 +2216,61 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 	}
 
 
+	private static boolean iceMarker(HeadMarkerEvent marker) {
+		return marker.markerIdMatches(FAKE_ICE, REAL_ICE);
+	}
+
+	private static boolean kefkaElementMarker(HeadMarkerEvent marker) {
+		return marker.getTarget().npcIdMatches(18475)
+				&& marker.markerIdMatches(FAKE_ICE, REAL_ICE, FAKE_THUNDER, REAL_THUNDER);
+	}
+
+	private StatusLoopVfxApplied waitExdeathVfx(SequentialTriggerController<BaseEvent> s) {
+		var next = s.waitEvent(BaseEvent.class, event ->
+				event instanceof HeadMarkerEvent marker && kefkaElementMarker(marker)
+				|| event instanceof StatusLoopVfxApplied vfx && vfx.getTarget().npcIdMatches(NPC_NEOXD));
+		s.expireLastCall();
+		return next instanceof StatusLoopVfxApplied vfx ? vfx
+				: s.waitEvent(StatusLoopVfxApplied.class, event -> event.getTarget().npcIdMatches(NPC_NEOXD));
+	}
+
 	@AutoFeed
 	private final SequentialTrigger<BaseEvent> kefkaSaysSq = SqtTemplates.sq(180_000,
 			AbilityCastStart.class, acs -> acs.abilityIdMatches(0xC2DC),
 			(e1, s) -> {
 				s.updateCall(kefkaSays, e1);
 
-				// Kefka's ID changes throughout the fight
 				final int NPC_KEFKA = 18475;
-				{
-					log.info("MM1 start");
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.getTarget().npcIdMatches(NPC_KEFKA));
-					boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_THUNDER));
-					boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_ICE));
+				List<List<HeadMarkerEvent>> elementPairs = new ArrayList<>();
+				while (true) {
+					var next = s.waitEvent(BaseEvent.class, event ->
+							event instanceof HeadMarkerEvent marker && kefkaElementMarker(marker)
+							|| event instanceof AbilityCastStart cast && cast.abilityIdMatches(0xBAA4));
+					if (next instanceof AbilityCastStart) {
+						break;
+					}
+					var marker = (HeadMarkerEvent) next;
+					var pair = elementPairs.stream().filter(group ->
+							Duration.between(group.get(0).getEffectiveHappenedAt(), marker.getEffectiveHappenedAt()).abs().toMillis() <= 200)
+							.findFirst().orElse(null);
+					if (pair == null) {
+						pair = new ArrayList<>();
+						elementPairs.add(pair);
+					}
+					if (pair.stream().anyMatch(existing -> iceMarker(existing) == iceMarker(marker))) {
+						continue;
+					}
+					pair.add(marker);
+					if (pair.size() != 2) {
+						continue;
+					}
+					boolean fakeThunder = pair.stream().anyMatch(hm -> hm.markerIdMatches(FAKE_THUNDER));
+					boolean fakeIce = pair.stream().anyMatch(hm -> hm.markerIdMatches(FAKE_ICE));
 					s.setParam("fakeThunder", fakeThunder);
 					s.setParam("fakeIce", fakeIce);
-					var hm1 = kefkaHM.get(0);
-					if (fakeThunder) {
-						s.updateCall(fakeIce ? ksFakeIceFakeThunder : ksRealIceFakeThunder, hm1);
-					}
-					else {
-						s.updateCall(fakeIce ? ksFakeIceRealThunder : ksRealIceRealThunder, hm1);
-					}
-					log.info("MM1 end");
-				}
-
-				// Mystery magic 2
-				{
-					log.info("MM2 start");
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.getTarget().npcIdMatches(NPC_KEFKA));
-					boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_THUNDER));
-					boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_ICE));
-					s.setParam("fakeThunder", fakeThunder);
-					s.setParam("fakeIce", fakeIce);
-					var hm1 = kefkaHM.get(0);
-					if (fakeThunder) {
-						s.updateCall(fakeIce ? ksFakeIceFakeThunder : ksRealIceFakeThunder, hm1);
-					}
-					else {
-						s.updateCall(fakeIce ? ksFakeIceRealThunder : ksRealIceRealThunder, hm1);
-					}
-					log.info("MM2 end");
-				}
-
-				// Mystery magic 3
-				{
-					log.info("MM3 start");
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.getTarget().npcIdMatches(NPC_KEFKA));
-					boolean fakeThunder = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_THUNDER));
-					boolean fakeIce = kefkaHM.stream().anyMatch(hme -> hme.markerIdMatches(FAKE_ICE));
-					s.setParam("fakeThunder", fakeThunder);
-					s.setParam("fakeIce", fakeIce);
-					var hm1 = kefkaHM.get(0);
-					if (fakeThunder) {
-						s.updateCall(fakeIce ? ksFakeIceFakeThunder : ksRealIceFakeThunder, hm1);
-					}
-					else {
-						s.updateCall(fakeIce ? ksFakeIceRealThunder : ksRealIceRealThunder, hm1);
-					}
-					log.info("MM3 end");
+					s.updateCall(fakeThunder
+							? fakeIce ? ksFakeIceFakeThunder : ksRealIceFakeThunder
+							: fakeIce ? ksFakeIceRealThunder : ksRealIceRealThunder, pair.get(0));
 				}
 
 				// Mana Charge
@@ -2275,14 +2311,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 
 				// Kefka's ID changes throughout the fight
 				final int NPC_KEFKA = 18475;
-				{
-					log.info("NE MM1 start");
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.getTarget().npcIdMatches(NPC_KEFKA));
-					log.info("NE MM1 end");
-				}
-				log.info("Waiting for neVfx1");
-				// TODO: make separate call for these
-				var neVfx1 = s.waitEvent(StatusLoopVfxApplied.class, v -> v.getTarget().npcIdMatches(NPC_NEOXD));
+				var neVfx1 = waitExdeathVfx(s);
 				boolean neReal1 = neVfx1.vfxIdMatches(REAL_NE);
 				// Wait for grand cross hit
 //				s.waitEvent(AbilityUsedEvent.class, aue -> aue.abilityIdMatches(0xBB14));
@@ -2336,16 +2365,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					s.updateCall(neReal1 ? ksRealLightning : ksFakeLightning, myFork1);
 				}
 
-				// Mystery magic 2
-				{
-					log.info("NE MM2 start");
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.getTarget().npcIdMatches(NPC_KEFKA));
-					s.expireLastCall();
-					log.info("NE MM2 end");
-				}
-
-				log.info("Waiting for neVfx2");
-				var neVfx2 = s.waitEvent(StatusLoopVfxApplied.class, v -> v.getTarget().npcIdMatches(NPC_NEOXD));
+				var neVfx2 = waitExdeathVfx(s);
 				boolean neReal2 = neVfx2.vfxIdMatches(REAL_NE);
 
 				log.info("Waiting for debuff spam 2");
@@ -2392,21 +2412,32 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				}
 
 
-				// Mystery magic 3
-				{
-					log.info("NE MM3 start");
-					List<HeadMarkerEvent> kefkaHM = s.waitEvents(2, HeadMarkerEvent.class, hme -> hme.getTarget().npcIdMatches(NPC_KEFKA));
-					s.expireLastCall();
-					log.info("NE MM3 end");
-				}
-
+				java.util.function.Predicate<BuffApplied> thirdSetBuff = ba ->
+						ba.buffIdMatches(WHITE_WOUND, BLACK_WOUND, ALLAG_FIELD, BEYOND_DEATH, BEYOND_DEATH_FAKE, WHITE_WOUND_FAKE, BLACK_WOUND_FAKE);
+				s.waitEvent(BaseEvent.class, event ->
+						event instanceof HeadMarkerEvent marker && kefkaElementMarker(marker)
+						|| event instanceof BuffApplied buff && thirdSetBuff.test(buff));
+				s.expireLastCall();
 
 				log.info("Waiting for white/black debuffs");
-				var myDebuffs3 = s.waitEventsQuickSuccession(16, BuffApplied.class, ba -> ba.buffIdMatches(WHITE_WOUND, BLACK_WOUND, ALLAG_FIELD, BEYOND_DEATH, BEYOND_DEATH_FAKE, WHITE_WOUND_FAKE, BLACK_WOUND_FAKE))
-						.stream()
-						.filter(ba -> ba.getTarget().isThePlayer())
-						.toList();
-				// These have inconsistent ordering, so use the external tracking
+				var thirdSet = new ArrayList<>(buffs.findBuffs(thirdSetBuff));
+				boolean cachedThirdSet = !thirdSet.isEmpty();
+				if (thirdSet.isEmpty()) {
+					thirdSet.add(s.findOrWaitForBuff(buffs, thirdSetBuff));
+				}
+				java.util.function.Predicate<BuffApplied> remainingThirdSet = ba ->
+						thirdSetBuff.test(ba) && thirdSet.stream().noneMatch(existing ->
+								existing.getBuff().equals(ba.getBuff()) && existing.getTarget().equals(ba.getTarget()));
+				if (cachedThirdSet && thirdSet.size() < 16) {
+					int remainingWindow = (int) Math.max(1, 200 - thirdSet.get(0).getEffectiveTimeSince().toMillis());
+					thirdSet.addAll(s.groupEvents(16 - thirdSet.size(), remainingWindow, BuffApplied.class,
+							false, List.of(remainingThirdSet)).get(remainingThirdSet));
+				}
+				else if (!cachedThirdSet) {
+					thirdSet.addAll(s.waitEventsQuickSuccession(16 - thirdSet.size(), BuffApplied.class, remainingThirdSet));
+				}
+				var myDebuffs3 = thirdSet.stream().filter(ba -> ba.getTarget().isThePlayer()).toList();
+				// VFX and wound updates can arrive in either order.
 				boolean neReal3 = realNe();
 				log.info("myDebuffs3: {}", myDebuffs3);
 				// Get hit
@@ -2417,6 +2448,7 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 				BuffApplied myWW = findById(myDebuffs3, WHITE_WOUND, WHITE_WOUND_FAKE);
 				// You will die if standing in white
 				BuffApplied myBW = findById(myDebuffs3, BLACK_WOUND, BLACK_WOUND_FAKE);
+				boolean woundKnown = (myBD != null || myAF != null) && (myWW != null || myBW != null);
 				log.info("Player debuffs: {} {} {} {}", myBD != null, myAF != null, myWW != null, myBW != null);
 				s.setParam("myBD", myBD);
 				s.setParam("myAF", myAF);
@@ -2444,12 +2476,17 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 						call = s.updateCall(neReal3 ? ks3RealBWAF : ks3FakeBWAF, myAF);
 					}
 				}
-				if (call == null) {
+				if (call == null && woundKnown) {
 					call = s.updateCall(ks3error);
+				}
+				else if (!woundKnown) {
+					log.warn("Kefka Says wound assignment incomplete: {}", myDebuffs3);
 				}
 
 				log.info("Waiting for neVfx4");
-				var neVfx4 = s.waitEvent(StatusLoopVfxApplied.class, v -> v.getTarget().npcIdMatches(NPC_NEOXD));
+				var woundTime = thirdSet.stream().map(BuffApplied::getEffectiveHappenedAt).max(java.time.Instant::compareTo).orElseThrow();
+				var neVfx4 = s.waitEvent(StatusLoopVfxApplied.class, v -> v.getTarget().npcIdMatches(NPC_NEOXD)
+						&& v.getEffectiveHappenedAt().isAfter(woundTime));
 				boolean neReal4 = neVfx4.vfxIdMatches(REAL_NE);
 
 				// Final place for player to stand
@@ -2472,7 +2509,9 @@ public class DMU extends AutoChildEventHandler implements FilteredEventHandler {
 					s.setParam("whitePos", whiteCleavePos);
 					s.setParam("blackPos", blackCleavePos);
 				}
-				s.updateCall(playerShouldStandInWhite ? ks3standInWhite : ks3standInBlack, blackCast);
+				if (woundKnown) {
+					s.updateCall(playerShouldStandInWhite ? ks3standInWhite : ks3standInBlack, blackCast);
+				}
 
 				s.waitCastFinished(casts, blackCast);
 
