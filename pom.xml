@@ -20,7 +20,10 @@
         <project.build.outputTimestamp>10</project.build.outputTimestamp>
         <surefire.threadcount>2</surefire.threadcount>
         <jackson.version>3.1.8</jackson.version>
+        <jackson2.version>2.21.7</jackson2.version>
         <apache-http.version>4.5.14</apache-http.version>
+        <apache-httpclient5.version>5.6.5</apache-httpclient5.version>
+        <apache-httpcore5.version>5.4.4</apache-httpcore5.version>
     </properties>
     <packaging>pom</packaging>
 
@@ -125,6 +128,29 @@
     </reporting>
     <dependencyManagement>
         <dependencies>
+            <!-- xivapi-java still uses Jackson 2 alongside the program's Jackson 3. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson2.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.httpcomponents.client5</groupId>
+                <artifactId>httpclient5</artifactId>
+                <version>${apache-httpclient5.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.httpcomponents.core5</groupId>
+                <artifactId>httpcore5</artifactId>
+                <version>${apache-httpcore5.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.httpcomponents.core5</groupId>
+                <artifactId>httpcore5-h2</artifactId>
+                <version>${apache-httpcore5.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.testng</groupId>
                 <artifactId>testng</artifactId>
