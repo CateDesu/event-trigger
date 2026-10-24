@@ -1,5 +1,7 @@
 # Triggevent
 
+Fork support: [Discord](https://discord.com/invite/TQJrbZcgKF)
+
 Triggevent is a comprehensive FFXIV addon that provides triggers, automarkers, overlays, log analysis, and more for 
 FFXIV. Whether you're an end user, a developer yourself, or a world prog 9th man, there's something for everyone.
 
