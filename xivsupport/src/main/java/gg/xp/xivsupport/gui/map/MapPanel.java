@@ -432,13 +432,13 @@ public class MapPanel extends JPanel implements MouseMotionListener, MouseListen
 
 	private boolean dragActive;
 
-	@SuppressWarnings({"NonAtomicOperationOnVolatileField", "lossy-conversions"})
+	@SuppressWarnings("NonAtomicOperationOnVolatileField")
 	@Override
 	public void mouseDragged(MouseEvent e) {
 		if (dragActive) {
 			Point curPoint = e.getLocationOnScreen();
-			double xDiff = curPoint.x - dragPoint.x;
-			double yDiff = curPoint.y - dragPoint.y;
+			int xDiff = curPoint.x - dragPoint.x;
+			int yDiff = curPoint.y - dragPoint.y;
 			curXpan += xDiff;
 			curYpan += yDiff;
 			dragPoint = curPoint;

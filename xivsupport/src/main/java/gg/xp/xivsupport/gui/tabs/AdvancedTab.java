@@ -321,9 +321,8 @@ public class AdvancedTab extends SmartTabbedPane implements Refreshable {
 				connPanel.add(Box.createHorizontalStrut(16384));
 				connPanel.add(ui.getTextBoxOnly());
 				connPanel.add(ui.getResetButton());
-				connPanel.add(new BooleanSettingGui(actWs.getAllowBadCert(), "Allow Bad Certs").getComponent());
 				connPanel.add(Box.createHorizontalStrut(16384));
-				connPanel.add(new JLabel("Reminder: use 'wss://' instead of 'ws://' if using SSL."));
+				connPanel.add(new JLabel("Use wss:// for TLS with a certificate trusted by Java."));
 				wsPanel.add(connPanel, gbc);
 			}
 			{

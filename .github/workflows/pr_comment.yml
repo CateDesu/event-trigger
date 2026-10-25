@@ -4,9 +4,14 @@ on:
   pull_request_target:
     types: [opened, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   comment:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - name: Leave a helpful comment on the PR
         uses: thollander/actions-comment-pull-request@v2

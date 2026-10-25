@@ -26,7 +26,7 @@ public class UpdaterConfig {
 
 	private static final Logger log = LoggerFactory.getLogger(UpdaterConfig.class);
 	private static final String propsOverrideFileName = "update.properties";
-	private static final Pattern allowedDirName = Pattern.compile("([A-Za-z][A-Za-z0-9-_]+)");
+	private static final Pattern allowedDirName = Pattern.compile("[A-Za-z][A-Za-z0-9_-]+");
 	private static final ObjectMapper mapper = new ObjectMapper();
 	private final File propsOverride;
 	private final PersistenceProvider updatePropsFilePers;
@@ -89,6 +89,11 @@ public class UpdaterConfig {
 		if (newAddonDef.url == null) {
 			newAddonDef.url = url;
 		}
+		validateAddonDef(newAddonDef);
+		return newAddonDef;
+	}
+
+	static void validateAddonDef(AddonDef newAddonDef) {
 		if (newAddonDef.name == null) {
 			throw new AddonValidationException("Addon did not have a name");
 		}
@@ -101,7 +106,9 @@ public class UpdaterConfig {
 		if (newAddonDef.urlPattern == null) {
 			throw new AddonValidationException("Addon did not define a download URL");
 		}
-		return newAddonDef;
+		if (newAddonDef.urlPattern.contains("\n") || newAddonDef.urlPattern.contains("\r")) {
+			throw new AddonValidationException("Addon download URL must not contain line breaks");
+		}
 	}
 
 	// TODO: also need a way of refreshing addon info from INFO files, in case the author wants to change the icon,
@@ -109,6 +116,7 @@ public class UpdaterConfig {
 	private void syncAddonConfig() {
 		addonUrlsSetting.set(addonSetting.getItems()
 				.stream()
+				.peek(UpdaterConfig::validateAddonDef)
 				.map(ad -> ad.dirName + ':' + ad.urlPattern)
 				.collect(Collectors.joining("\n"))
 		);

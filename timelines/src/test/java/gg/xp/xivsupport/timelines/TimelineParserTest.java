@@ -187,6 +187,42 @@ public class TimelineParserTest {
 		Assert.assertTrue(textFileTimelineEntry.forceJump());
 	}
 
+	@Test(timeOut = 5000)
+	void rejectsLongMalformedFieldsWithoutBacktracking() {
+		for (String line : List.of(
+				"1 " + "\"a\"".repeat(100_000) + "!",
+				"1 \"a\" duration " + "1".repeat(100_000) + "!",
+				"1 \"a\" window " + "1".repeat(100_000) + ",!",
+				"1 \"a\" Ability " + " {x".repeat(100_000),
+				"1 " + " sync /a/".repeat(100_000) + "!",
+				"1 \"a\"" + " duration 1".repeat(100_000) + "!")) {
+			Assert.assertNull(TimelineParser.parseRaw(line));
+		}
+	}
+
+	@Test
+	void keepsDecimalFieldsCommentsAndSyncSlashes() {
+		TimelineEntry entry = TimelineParser.parseRaw("2. \"Name\" duration .5 window .25,1. jump .75 sync /a/b/ # fixture");
+		Assert.assertNotNull(entry);
+		Assert.assertEquals(entry.time(), 2.0);
+		Assert.assertEquals(entry.duration(), (Double) 0.5);
+		Assert.assertEquals(entry.timelineWindow().start(), 0.25);
+		Assert.assertEquals(entry.timelineWindow().end(), 1.0);
+		Assert.assertEquals(entry.jump(), (Double) 0.75);
+		Assert.assertEquals(entry.sync().pattern(), "a/b");
+	}
+
+	@Test
+	void keepsSlashesInFieldsAfterSync() {
+		TimelineEntry entry = TimelineParser.parseRaw("0 \"Before\" sync /foo/bar/ jump \"a/b\"");
+		Assert.assertNotNull(entry);
+		Assert.assertEquals(entry.sync().pattern(), "foo/bar");
+		Assert.assertEquals(entry.jumpLabel(), "a/b");
+		entry = TimelineParser.parseRaw("0 \"Before\" sync /foo/ Ability { source: \"a/b\" }");
+		Assert.assertNotNull(entry);
+		Assert.assertEquals(entry.sync().pattern(), "foo");
+	}
+
 	private void assertDefaultTimelineWindow(TimelineEntry entry) {
 		Assert.assertNotNull(entry.timelineWindow());
 		Assert.assertEquals(entry.timelineWindow().start(), 2.5d);

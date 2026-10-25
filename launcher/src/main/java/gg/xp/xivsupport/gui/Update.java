@@ -21,6 +21,7 @@ import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
@@ -35,6 +36,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -62,21 +65,148 @@ public class Update {
 	private String rawAddonTemplates;
 
 	private URI makeUrl(String filename) {
-		try {
-			return new URI(getUrlTemplate().formatted(getBranch(), filename));
-		}
-		catch (URISyntaxException e) {
-			throw new RuntimeException(e);
-		}
+		return makeDownloadUri(getUrlTemplate(), getBranch(), filename);
 	}
 
 	private URI makeAddonUrl(String urlTemplate, String filename) {
+		return makeDownloadUri(urlTemplate, null, filename);
+	}
+
+	private static String expandTemplate(String template, String branch, String filename) {
+		StringBuilder result = new StringBuilder();
+		int nextArgument = 0;
+		for (int index = 0; index < template.length(); index++) {
+			char character = template.charAt(index);
+			if (character != '%') {
+				result.append(character);
+				continue;
+			}
+			if (template.startsWith("%%", index)) {
+				result.append('%');
+				index++;
+			}
+			else if (template.startsWith("%s", index)) {
+				int argument = nextArgument++;
+				if (argument > (branch == null ? 0 : 1)) {
+					throw new IllegalArgumentException("Too many update URL placeholders");
+				}
+				result.append(branch != null && argument == 0 ? branch : filename);
+				index++;
+			}
+			else if (template.startsWith("%1$s", index)) {
+				result.append(branch == null ? filename : branch);
+				index += 3;
+			}
+			else if (branch != null && template.startsWith("%2$s", index)) {
+				result.append(filename);
+				index += 3;
+			}
+			else if (index + 2 < template.length()
+					&& Character.digit(template.charAt(index + 1), 16) >= 0
+					&& Character.digit(template.charAt(index + 2), 16) >= 0) {
+				int encoded = Integer.parseInt(template.substring(index + 1, index + 3), 16);
+				if (encoded < 32 || encoded == 127) {
+					throw new IllegalArgumentException("Update URLs must not contain control characters");
+				}
+				result.append(template, index, index + 3);
+				index += 2;
+			}
+			else {
+				throw new IllegalArgumentException("Unsupported update URL placeholder");
+			}
+		}
+		return result.toString();
+	}
+
+	private static void validateRelativePath(String name) {
+		if (name.isEmpty() || name.startsWith("/") || name.contains("\\")
+				|| name.contains(":") || name.contains("%") || name.contains("?") || name.contains("#")
+				|| name.chars().anyMatch(character -> character < 32 || character == 127)) {
+			throw new IllegalArgumentException("Invalid update file path: " + name);
+		}
+		for (String component : name.split("/", -1)) {
+			if (component.isEmpty() || component.endsWith(".") || component.endsWith(" ")
+					|| component.matches("(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\..*)?")) {
+				throw new IllegalArgumentException("Invalid update file path: " + name);
+			}
+		}
+	}
+
+	private static URI validateDownloadUri(URI uri) {
+		String host = uri.getHost();
+		if (host == null || uri.getRawUserInfo() != null || uri.getRawFragment() != null
+				|| !("https".equalsIgnoreCase(uri.getScheme())
+				|| "http".equalsIgnoreCase(uri.getScheme())
+				&& Set.of("localhost", "127.0.0.1", "[::1]").contains(host.toLowerCase(Locale.ROOT)))) {
+			throw new IllegalArgumentException("Update URLs require HTTPS or a loopback HTTP server");
+		}
+		return uri;
+	}
+
+	private static boolean sameOrigin(URI first, URI second) {
+		return first.getScheme().equalsIgnoreCase(second.getScheme())
+				&& first.getHost().equalsIgnoreCase(second.getHost())
+				&& effectivePort(first) == effectivePort(second);
+	}
+
+	private static int effectivePort(URI uri) {
+		return uri.getPort() == -1 ? (uri.getScheme().equalsIgnoreCase("https") ? 443 : 80) : uri.getPort();
+	}
+
+	private static URI makeDownloadUri(String template, String branch, String filename) {
+		validateRelativePath(filename);
+		if (branch != null) {
+			validateRelativePath(branch);
+		}
 		try {
-			return new URI(urlTemplate.formatted(filename));
+			URI expectedOrigin = validateDownloadUri(new URI(expandTemplate(template, branch == null ? null : "branch", "manifest")));
+			URI alternate = validateDownloadUri(new URI(expandTemplate(template, branch == null ? null : "other-branch", "other-file")));
+			if (!sameOrigin(expectedOrigin, alternate)) {
+				throw new IllegalArgumentException("Update URL placeholders must not change the server");
+			}
+			URI uri = validateDownloadUri(new URI(expandTemplate(template, branch, filename)));
+			if (!sameOrigin(expectedOrigin, uri)) {
+				throw new IllegalArgumentException("Update URL placeholders must not change the server");
+			}
+			return uri;
 		}
 		catch (URISyntaxException e) {
-			throw new RuntimeException(e);
+			throw new IllegalArgumentException("Invalid update URL", e);
 		}
+	}
+
+	private <T> HttpResponse<T> download(URI uri, HttpResponse.BodyHandler<T> bodyHandler) throws IOException, InterruptedException {
+		URI original = validateDownloadUri(uri);
+		for (int redirects = 0; redirects <= 5; redirects++) {
+			HttpResponse<T> response = client.send(HttpRequest.newBuilder().GET().uri(uri).build(), info -> {
+				if (isRedirect(info.statusCode())) {
+					return HttpResponse.BodySubscribers.replacing(null);
+				}
+				return bodyHandler.apply(info);
+			});
+			if (!isRedirect(response.statusCode())) {
+				return response;
+			}
+			URI target = validateDownloadUri(uri.resolve(response.headers().firstValue("Location")
+					.orElseThrow(() -> new IOException("Update redirect did not include a location"))));
+			if (!sameOrigin(original, target) && !isGithubReleaseRedirect(original, target)) {
+				throw new IOException("Update redirect changed the server");
+			}
+			uri = target;
+		}
+		throw new IOException("Too many update redirects");
+	}
+
+	private static boolean isRedirect(int status) {
+		return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+	}
+
+	private static boolean isGithubReleaseRedirect(URI original, URI target) {
+		return original.getScheme().equalsIgnoreCase("https") && original.getHost().equalsIgnoreCase("github.com")
+				&& original.getPath().contains("/releases/download/")
+				&& target.getScheme().equalsIgnoreCase("https") && effectivePort(target) == 443
+				&& Set.of("release-assets.githubusercontent.com", "objects.githubusercontent.com")
+				.contains(target.getHost().toLowerCase(Locale.ROOT));
 	}
 
 	private record UpdaterLocation(
@@ -94,8 +224,8 @@ public class Update {
 		String branch;
 		if (propsOverride.exists()) {
 			appendText("Properties file exists, loading it...");
-			try {
-				props.load(new FileInputStream(propsOverride));
+			try (FileInputStream input = new FileInputStream(propsOverride)) {
+				props.load(input);
 			}
 			catch (IOException e) {
 				appendText("ERROR: Could not read properties!");
@@ -117,8 +247,8 @@ public class Update {
 			appendText("Properties file does not exist, creating one with defaults");
 			props.setProperty("branch", defaultBranch);
 			branch = defaultBranch;
-			try {
-				props.store(new FileOutputStream(propsOverride), "Created by updater");
+			try (FileOutputStream output = new FileOutputStream(propsOverride)) {
+				props.store(output, "Created by updater");
 			}
 			catch (IOException e) {
 				appendText("ERROR: Could not save properties!");
@@ -151,11 +281,18 @@ public class Update {
 	}
 
 	private Manifest getMainLocation() {
-		return new Manifest("Main", Path.of("."), this::makeUrl) {
+		return new Manifest("Main", installDir.toPath().toAbsolutePath().normalize(), this::makeUrl) {
 			@Override
 			URI getManifestUri() {
 				// Adding random junk to bypass cache
-				return getUriForFile(manifestFile + "?q=" + System.currentTimeMillis() % 1000);
+				URI source = getUriForFile(manifestFile);
+				try {
+					String query = source.getRawQuery();
+					return new URI(source + (query == null ? "?" : "&") + "q=" + System.currentTimeMillis() % 1000);
+				}
+				catch (URISyntaxException e) {
+					throw new IllegalArgumentException("Invalid update URL", e);
+				}
 			}
 
 			@Override
@@ -169,14 +306,16 @@ public class Update {
 		return getAddonUrlTemplates()
 				.stream()
 				.map(line -> {
-					// TODO: somewhere, there needs to be validation that someone didn't stick a : in the name of their addon
 					String[] split = line.split(":", 2);
 					if (split.length != 2) {
 						throw new IllegalArgumentException("Malformed addon spec: " + line);
 					}
 					String name = split[0];
+					if (!name.matches("[A-Za-z][A-Za-z0-9_-]+")) {
+						throw new IllegalArgumentException("Invalid addon directory name: " + name);
+					}
 					String urlTemplate = split[1];
-					return new Manifest(name, Path.of("addon", name), file -> makeAddonUrl(urlTemplate, file));
+					return new Manifest(name, getLocalFile("addon/" + name), file -> makeAddonUrl(urlTemplate, file));
 				})
 				.toList();
 	}
@@ -187,10 +326,21 @@ public class Update {
 	}
 
 	private Path getLocalFile(String name) {
-		return Paths.get(installDir.toString(), name);
+		validateRelativePath(name);
+		Path root = installDir.toPath().toAbsolutePath().normalize();
+		Path file = root.resolve(name).normalize();
+		if (!file.startsWith(root) || file.equals(root)) {
+			throw new IllegalArgumentException("Update file escapes its installation directory");
+		}
+		for (Path current = file; !current.equals(root); current = current.getParent()) {
+			if (Files.isSymbolicLink(current)) {
+				throw new IllegalArgumentException("Update file must not use symbolic links: " + name);
+			}
+		}
+		return file;
 	}
 
-	private final HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
+	private final HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
 
 	private Update(Consumer<String> logging, boolean updateTheUpdaterItself, boolean onlyCheck) {
 		this.logging = logging;
@@ -222,7 +372,7 @@ public class Update {
 				throw new RuntimeException("Not a directory: " + installDir);
 			}
 		}
-		depsDir = Paths.get(installDir.toString(), "deps").toFile();
+		depsDir = getLocalFile("deps").toFile();
 		propsOverride = Paths.get(installDir.toString(), propsOverrideFileName).toFile();
 		appendText("Install dir: " + installDir);
 		appendText("Starting update check...");
@@ -328,7 +478,7 @@ public class Update {
 
 	// Need forward slashes regardless of platform since we need forward slashes in HTTP URLs
 	private String fixRelativeFilePath(String relativePath) {
-		return fixFileSeparators(installDir.toPath().relativize(Path.of(relativePath).toAbsolutePath()));
+		return fixFileSeparators(installDir.toPath().toAbsolutePath().normalize().relativize(Path.of(relativePath).toAbsolutePath().normalize()));
 	}
 
 	private String fixFileSeparators(Path path) {
@@ -353,7 +503,7 @@ public class Update {
 			// filePath = addon/foo/bar.jar
 			// mft.dr = addon/foo
 			Path baseMftDir = mft.dir.toAbsolutePath();
-			String pathFromAddonBase = fixFileSeparators(baseMftDir.relativize(Path.of(filePath).toAbsolutePath()));
+			String pathFromAddonBase = fixFileSeparators(baseMftDir.relativize(getLocalFile(filePath).toAbsolutePath()));
 			return mft.getUriForFile(pathFromAddonBase);
 		}
 
@@ -441,7 +591,7 @@ public class Update {
 	}
 
 	private void deleteRemovedAddons(List<Manifest> manifests) {
-		File[] addonDirs = installDir.toPath().resolve("addon").toFile().listFiles(File::isDirectory);
+		File[] addonDirs = getLocalFile("addon").toFile().listFiles(File::isDirectory);
 		if (addonDirs != null) {
 			for (File addonDir : addonDirs) {
 				String dirName = addonDir.getName();
@@ -497,17 +647,35 @@ public class Update {
 		else {
 			appendText("Checking for updates to addon '%s'".formatted(manifest.name));
 		}
-		manifest.dir.toFile().mkdirs();
 		URI uri = manifest.getManifestUri();
-		HttpResponse<String> manifestResponse = client.send(HttpRequest.newBuilder().GET().uri(uri).build(), HttpResponse.BodyHandlers.ofString());
+		HttpResponse<String> manifestResponse = download(uri, HttpResponse.BodyHandlers.ofString());
 		if (manifestResponse.statusCode() != 200) {
 			throw new RuntimeException("Bad response: %s: %s".formatted(manifestResponse.statusCode(), manifestResponse));
 		}
 		String body = manifestResponse.body();
-		Map<String, ExpectedFile> expectedFilesForThisManifest = body.lines()
-				.map(line -> line.split("\s+"))
-				.map(s -> new ExpectedFile(manifest, Path.of(manifest.dir.toString(), s[1]).toString(), s[0]))
-				.collect(Collectors.toMap(ExpectedFile::filePath, Function.identity()));
+		Map<String, ExpectedFile> expectedFilesForThisManifest = new HashMap<>();
+		for (String line : body.lines().toList()) {
+			if (line.isBlank()) {
+				continue;
+			}
+			String[] fields = line.trim().split("\\s+", 2);
+			if (fields.length != 2) {
+				throw new IllegalArgumentException("Invalid update manifest entry");
+			}
+			validateRelativePath(fields[1]);
+			Path root = manifest.dir.toAbsolutePath().normalize();
+			Path file = root.resolve(fields[1]).normalize();
+			if (!file.startsWith(root)) {
+				throw new IllegalArgumentException("Update file escapes its manifest directory");
+			}
+			String relative = fixFileSeparators(installDir.toPath().toAbsolutePath().normalize().relativize(file));
+			getLocalFile(relative);
+			ExpectedFile expected = new ExpectedFile(manifest, file.toString(), fields[0]);
+			if (expectedFilesForThisManifest.putIfAbsent(expected.filePath(), expected) != null) {
+				throw new IllegalArgumentException("Duplicate update manifest entry");
+			}
+		}
+		Files.createDirectories(manifest.dir);
 		// TODO: parallelize multiple manifests
 		Map<String, ExpectedFile> expectedFiles = new HashMap<>();
 		expectedFilesForThisManifest.forEach(expectedFiles::putIfAbsent);
@@ -521,7 +689,7 @@ public class Update {
 						String nameLower = name.toLowerCase(Locale.ROOT);
 						return nameLower.endsWith(".exe") || nameLower.endsWith(".dll");
 					});
-					File[] depsFiles = depsDir.listFiles();
+					File[] depsFiles = getLocalFile("deps").toFile().listFiles();
 					if (mainFiles == null) {
 						throw new RuntimeException("Error checking local main files. Try reinstalling.");
 					}
@@ -538,7 +706,7 @@ public class Update {
 					}
 				}
 				else {
-					File[] addonFiles = manifest.dir.toFile().listFiles();
+					File[] addonFiles = getLocalFile(fixRelativeFilePath(manifest.dir.toString())).toFile().listFiles();
 					if (addonFiles == null) {
 						addonFiles = new File[0];
 					}
@@ -605,53 +773,68 @@ public class Update {
 			});
 			if (!noop) {
 				appendText(String.format("Updating %s files...", filesToDownload.size()));
-				localFilesToDelete.forEach(info -> {
-					boolean deleted;
-					do {
-						File file = info.file;
-						if (!file.exists()) {
-							appendText("Warn: Tried to delete file %s but it was already gone?".formatted(fixRelativeFilePath(file.toString())));
-							return;
-						}
-						deleted = file.delete();
-						if (deleted) {
-							return;
-						}
-						appendText("Could not delete file %s. Make sure the app is not running.".formatted(info.filePath()));
-						try {
-							Thread.sleep(5000);
-						}
-						catch (InterruptedException e) {
-							// ignore
-						}
-					} while (true);
-				});
-				// TODO: download to temp files **first**, then delete, then replace
-
-				// Validate paths
-				Path manifestDir = manifest.dir.toAbsolutePath();
+				Path manifestDir = manifest.dir.toAbsolutePath().normalize();
 				for (ExpectedFile expectedFile : filesToDownload) {
-					Path filePath = getLocalFile(expectedFile.filePath).toAbsolutePath();
-					Path relative = manifestDir.relativize(filePath);
-					if (relative.startsWith("..")) {
-						throw new IllegalStateException("Addon '%s' tried to escape its directory! Attempted to write to '%s'!".formatted(manifest.name, relative));
+					Path filePath = getLocalFile(expectedFile.filePath).toAbsolutePath().normalize();
+					if (!filePath.startsWith(manifestDir)) {
+						throw new IllegalStateException("Addon '%s' tried to escape its directory! Attempted to write to '%s'!".formatted(manifest.name, filePath));
 					}
 				}
-				// TODO: why is both mkdirs() and mkdir() being used?
+				Map<ExpectedFile, Path> downloadedFiles = new ConcurrentHashMap<>();
+				ConcurrentLinkedQueue<RuntimeException> failures = new ConcurrentLinkedQueue<>();
 				AtomicInteger downloaded = new AtomicInteger();
-				filesToDownload.parallelStream().forEach((info) -> {
-					Path localFile = getLocalFile(info.filePath());
-					appendText("Downloading %s / %s (%s)".formatted(downloaded.incrementAndGet(), filesToDownload.size(), info.filePath));
-//					appendText("Downloading URL '%s' to local file '%s'".formatted(info.getUri(), localFile));
-					HttpResponse.BodyHandler<Path> handler = HttpResponse.BodyHandlers.ofFile(localFile);
-					try {
-						client.send(HttpRequest.newBuilder().GET().uri(info.getUri()).build(), handler);
+				try {
+					filesToDownload.parallelStream().forEach(info -> {
+						try {
+							Path temporaryFile = Files.createTempFile(manifestDir, ".triggevent-update-", ".tmp");
+							downloadedFiles.put(info, temporaryFile);
+							appendText("Downloading %s / %s (%s)".formatted(downloaded.incrementAndGet(), filesToDownload.size(), info.filePath));
+							HttpResponse<Path> response = download(info.getUri(), HttpResponse.BodyHandlers.ofFile(temporaryFile));
+							if (response.statusCode() < 200 || response.statusCode() >= 300) {
+								throw new IOException("Download failed with HTTP " + response.statusCode() + ": " + info.getUri());
+							}
+						}
+						catch (InterruptedException e) {
+							Thread.currentThread().interrupt();
+							failures.add(new RuntimeException(e));
+						}
+						catch (IOException | RuntimeException e) {
+							failures.add(new RuntimeException(e));
+						}
+					});
+					if (!failures.isEmpty()) {
+						throw failures.remove();
 					}
-					catch (IOException | InterruptedException e) {
-						throw new RuntimeException(e);
+					localFilesToDelete.forEach(info -> {
+						boolean deleted;
+						do {
+							File file = info.file;
+							if (!file.exists()) {
+								appendText("Warn: Tried to delete file %s but it was already gone?".formatted(fixRelativeFilePath(file.toString())));
+								return;
+							}
+							deleted = file.delete();
+							if (deleted) {
+								return;
+							}
+							appendText("Could not delete file %s. Make sure the app is not running.".formatted(info.filePath()));
+							try {
+								Thread.sleep(5000);
+							}
+							catch (InterruptedException e) {
+								// ignore
+							}
+						} while (true);
+					});
+					for (ExpectedFile info : filesToDownload) {
+						Files.move(downloadedFiles.get(info), getLocalFile(info.filePath()), StandardCopyOption.REPLACE_EXISTING);
 					}
-//					appendText(String.format("Downloaded %s / %s files", downloaded.incrementAndGet(), filesToDownload.size()));
-				});
+				}
+				finally {
+					for (Path temporaryFile : downloadedFiles.values()) {
+						Files.deleteIfExists(temporaryFile);
+					}
+				}
 				appendText("Done downloading files");
 				appendText("Update finished! %s files needed to be updated.".formatted(filesToDownload.size()));
 			}

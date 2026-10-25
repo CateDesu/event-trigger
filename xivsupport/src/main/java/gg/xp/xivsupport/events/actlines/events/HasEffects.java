@@ -11,7 +11,7 @@ public interface HasEffects {
 
 	// TODO: possibly not accurate, need to account for parries and stuff
 	default long getDamage() {
-		int amount = 0;
+		long amount = 0;
 		//noinspection Convert2streamapi
 		for (AbilityEffect effect : getEffects()) {
 			if (effect instanceof DamageEffect de) {

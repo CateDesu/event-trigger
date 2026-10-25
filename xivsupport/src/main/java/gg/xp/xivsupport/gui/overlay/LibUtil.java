@@ -16,7 +16,7 @@ public class LibUtil {
 	private static final String NATIVE_FOLDER_PATH_PREFIX = "nativeutils";
 	private static File temporaryDir;
 
-	public static void loadLibraryFromJar(String path) {
+	public static synchronized void loadLibraryFromJar(String path) {
 
 		try {
 			if (null == path || !path.startsWith("/")) {
@@ -28,8 +28,9 @@ public class LibUtil {
 			String filename = (parts.length > 1) ? parts[parts.length - 1] : null;
 
 			// Check if the filename is okay
-			if (filename == null || filename.length() < MIN_PREFIX_LENGTH) {
-				throw new IllegalArgumentException("The filename has to be at least 3 characters long.");
+			if (filename == null || filename.length() < MIN_PREFIX_LENGTH
+					|| filename.indexOf('\\') >= 0 || filename.indexOf(':') >= 0) {
+				throw new IllegalArgumentException("Invalid native library filename.");
 			}
 
 			// Prepare temporary file
@@ -84,13 +85,7 @@ public class LibUtil {
 		}
 	}
 
-	private static File createTempDirectory(String prefix) throws IOException {
-		String tempDir = System.getProperty("java.io.tmpdir");
-		File generatedDir = new File(tempDir, prefix + System.nanoTime());
-
-		if (!generatedDir.mkdir())
-			throw new IOException("Failed to create temp directory " + generatedDir.getName());
-
-		return generatedDir;
+	static File createTempDirectory(String prefix) throws IOException {
+		return Files.createTempDirectory(prefix).toFile();
 	}
 }

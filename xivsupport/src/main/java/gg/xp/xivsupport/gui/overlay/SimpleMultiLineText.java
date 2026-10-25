@@ -77,7 +77,7 @@ public class SimpleMultiLineText extends Component {
 		if (width <= 0) {
 			return;
 		}
-		int height = 0;
+		float height = 0;
 		int maxLineWidth = 0;
 		List<TextLayout> lines = new ArrayList<>();
 		while (lbm.getPosition() < text.length()) {
@@ -86,7 +86,7 @@ public class SimpleMultiLineText extends Component {
 			maxLineWidth = (int) Math.max(maxLineWidth, layout.getBounds().getWidth());
 			lines.add(layout);
 		}
-		output = new Output(maxLineWidth, height, lines);
+		output = new Output(maxLineWidth, (int) Math.ceil(height), lines);
 	}
 
 	@Override
@@ -107,7 +107,7 @@ public class SimpleMultiLineText extends Component {
 		g.setFont(getFont());
 		g.setColor(getForeground());
 		List<TextLayout> lines = output.lines;
-		int yPos = 0;
+		float yPos = 0;
 		for (TextLayout line : lines) {
 			yPos += line.getAscent();
 			Rectangle2D lineBounds = line.getBounds();

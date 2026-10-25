@@ -26,14 +26,7 @@ import org.slf4j.LoggerFactory;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import java.net.URI;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -82,7 +75,6 @@ public class ActWsLogSource implements EventSource {
 
 	// Settings
 	private final WsURISetting uriSetting;
-	private final BooleanSetting allowBadCert;
 	private final BooleanSetting allowTts;
 	private final BooleanSetting allowSound;
 	private final BooleanSetting fastRefreshNonCombatant;
@@ -97,8 +89,7 @@ public class ActWsLogSource implements EventSource {
 	}
 
 	private record WsConnectingSettings(
-			URI uri,
-			boolean allowBadCerts
+			URI uri
 	) {
 	}
 
@@ -110,39 +101,6 @@ public class ActWsLogSource implements EventSource {
 		public ActWsClientInternal(WsConnectingSettings settings) {
 			super(settings.uri);
 			this.settings = settings;
-			if (settings.allowBadCerts && "wss".equalsIgnoreCase(getURI().getScheme())) {
-
-
-				TrustManager tm = new X509TrustManager() {
-					@Override
-					public void checkClientTrusted(X509Certificate[] chain, String authType) {
-
-					}
-
-					@Override
-					public void checkServerTrusted(X509Certificate[] chain, String authType) {
-
-					}
-
-					@Override
-					public X509Certificate[] getAcceptedIssuers() {
-						return new X509Certificate[0];
-					}
-				};
-
-				SSLContext sslContext;
-				try {
-					sslContext = SSLContext.getInstance("TLS");
-					sslContext.init(null, new TrustManager[]{tm}, null);
-				}
-				catch (NoSuchAlgorithmException | KeyManagementException e) {
-					throw new RuntimeException(e);
-				}
-
-				SSLSocketFactory factory = sslContext.getSocketFactory();
-
-				setSocketFactory(factory);
-			}
 		}
 
 		@Override
@@ -257,14 +215,12 @@ public class ActWsLogSource implements EventSource {
 
 	public ActWsLogSource(EventMaster master, StateStore stateStore, PersistenceProvider pers, PrimaryLogSource pls) {
 		this.uriSetting = new WsURISetting(pers, "actws-uri", defaultUri);
-		this.allowBadCert = new BooleanSetting(pers, "acts-allow-bad-cert", false);
 		this.eventConsumer = master::pushEvent;
 		this.allowTts = new BooleanSetting(pers, "actws-allow-tts", true);
 		this.allowSound = new BooleanSetting(pers, "actws-allow-sound", false);
 		this.fastRefreshNonCombatant = new BooleanSetting(pers, "actws-fast-noncombatants-refresh", false);
 		this.pls = pls;
 		uriSetting.addListener(this::makeConnected);
-		allowBadCert.addListener(this::makeConnected);
 		// TODO: drop this
 		stateStore.putCustom(WsState.class, state);
 	}
@@ -276,7 +232,7 @@ public class ActWsLogSource implements EventSource {
 	}
 
 	private WsConnectingSettings currentSettings() {
-		return new WsConnectingSettings(uriSetting.get(), allowBadCert.get());
+		return new WsConnectingSettings(uriSetting.get());
 	}
 
 	private void clearOldClient() {
@@ -511,10 +467,6 @@ public class ActWsLogSource implements EventSource {
 
 	public WsURISetting getUriSetting() {
 		return uriSetting;
-	}
-
-	public BooleanSetting getAllowBadCert() {
-		return allowBadCert;
 	}
 
 	public BooleanSetting getAllowTts() {

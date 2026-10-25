@@ -16,20 +16,24 @@ import java.util.stream.Collectors;
 public final class TimelineParser {
 
 	private static final Logger log = LoggerFactory.getLogger(TimelineParser.class);
-	// TODO: there are also windows that do not have a start + end, only a single number
-	private static final Pattern timelinePatternLong = Pattern.compile("^(?<time>\\d+\\.?\\d*)" +
-	                                                                   // These can be in any order
-	                                                                   // This non-capturing group matches one element each pass
-	                                                                   " (?:\"(?<title>[^\"]*)\"|" +
-	                                                                   " sync /(?<sync>.*)/|" +
-	                                                                   " window (?:(?<windowStart>\\d*\\.?\\d*),)?(?<windowEnd>\\d*\\.?\\d*)|" +
-	                                                                   " (?<forcejump>force)?jump (?:\"(?<jumplabel>[^\"]*)\"|(?<jump>\\d*\\.?\\d*))|" +
-	                                                                   " (?<eventType>[A-Z].*) (?<eventCond>\\{[^}]*})|" +
-	                                                                   " duration (?<duration>\\d*\\.?\\d*)" +
-	                                                                   ")*(?:$|\\s*#.*$)"
+	private static final String number = "(?:\\d++(?:\\.\\d*+)?|\\.\\d++)";
+	private static final String trailingFields = "(?:\"[^\"]*+\"|"
+	                                             + " window (?:" + number + ",)?" + number + "|"
+	                                             + " (?:force)?jump (?:\"[^\"]*+\"|" + number + ")|"
+	                                             + " [A-Z][A-Za-z0-9_]*+ \\{[^}]*+}|"
+	                                             + " duration " + number + ")*+(?:$|\\s*+#.*$)";
+	// Commit each field so malformed input cannot repartition earlier fields.
+	private static final Pattern timelinePatternLong = Pattern.compile("^(?<time>\\d++(?:\\.\\d*+)?)" +
+	                                                                   " (?>\"(?<title>[^\"]*+)\"|" +
+	                                                                   " sync /(?<sync>.*)/(?=" + trailingFields + ")|" +
+	                                                                   " window (?:(?<windowStart>" + number + "),)?(?<windowEnd>" + number + ")|" +
+	                                                                   " (?<forcejump>force)?jump (?:\"(?<jumplabel>[^\"]*+)\"|(?<jump>" + number + "))|" +
+	                                                                   " (?<eventType>[A-Z][A-Za-z0-9_]*+) (?<eventCond>\\{[^}]*+})|" +
+	                                                                   " duration (?<duration>" + number + ")" +
+	                                                                   ")*+(?:$|\\s*+#.*$)"
 	);
 
-	private static final Pattern timelineLabelPattern = Pattern.compile("^(?<time>\\d+\\.?\\d*) label \"(?<label>[^\"]*)\"");
+	private static final Pattern timelineLabelPattern = Pattern.compile("^(?<time>\\d++(?:\\.\\d*+)?) label \"(?<label>[^\"]*+)\"");
 
 	private TimelineParser() {
 	}
